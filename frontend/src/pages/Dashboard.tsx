@@ -17,11 +17,13 @@ import { api } from "../api/client";
 import type { BudgetMonthView, DebtSummary, Goal } from "../api/types";
 import { Card, EmptyState, PageHeader, ProgressBar, StatCard } from "../components/ui";
 import { CHART_COLORS, fmtMoney, MONTH_NAMES, toNum } from "../lib/format";
+import { useUserCurrency } from "../lib/useCurrency";
 
 export default function Dashboard() {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
+  const currency = useUserCurrency();
 
   const monthView = useQuery({
     queryKey: ["budget-month", year, month],
@@ -63,28 +65,28 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Income"
-          value={fmtMoney(monthView.data?.income_actual)}
+          value={fmtMoney(monthView.data?.income_actual, currency)}
           accent="emerald"
           icon={<ArrowDownRight className="h-5 w-5" />}
-          hint={`Planned ${fmtMoney(monthView.data?.income_planned)}`}
+          hint={`Planned ${fmtMoney(monthView.data?.income_planned, currency)}`}
         />
         <StatCard
           label="Expenses"
-          value={fmtMoney(monthView.data?.expenses_actual)}
+          value={fmtMoney(monthView.data?.expenses_actual, currency)}
           accent="rose"
           icon={<ArrowUpRight className="h-5 w-5" />}
-          hint={`Planned ${fmtMoney(monthView.data?.expenses_planned)}`}
+          hint={`Planned ${fmtMoney(monthView.data?.expenses_planned, currency)}`}
         />
         <StatCard
           label="Saving"
-          value={fmtMoney(monthView.data?.saving_actual)}
+          value={fmtMoney(monthView.data?.saving_actual, currency)}
           accent="sky"
           icon={<PiggyBank className="h-5 w-5" />}
-          hint={`Planned ${fmtMoney(monthView.data?.saving_planned)}`}
+          hint={`Planned ${fmtMoney(monthView.data?.saving_planned, currency)}`}
         />
         <StatCard
           label="Total debt"
-          value={fmtMoney(debts.data?.total_owed)}
+          value={fmtMoney(debts.data?.total_owed, currency)}
           accent="amber"
           icon={<CreditCard className="h-5 w-5" />}
           hint={`${debts.data?.by_debt.length ?? 0} obligations`}
@@ -98,7 +100,7 @@ export default function Dashboard() {
             <span className="text-xs text-slate-500 nums">
               Net cashflow:{" "}
               <span className={netCashflow >= 0 ? "text-emerald-600" : "text-rose-600"}>
-                {fmtMoney(netCashflow)}
+                {fmtMoney(netCashflow, currency)}
               </span>
             </span>
           </div>
@@ -125,7 +127,7 @@ export default function Dashboard() {
                     border: "1px solid #e2e8f0",
                     fontSize: 12,
                   }}
-                  formatter={(v: number) => fmtMoney(v)}
+                  formatter={(v: number) => fmtMoney(v, currency)}
                 />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar dataKey="Planned" fill="#cbd5e1" radius={[4, 4, 0, 0]} />
@@ -162,7 +164,7 @@ export default function Dashboard() {
                     border: "1px solid #e2e8f0",
                     fontSize: 12,
                   }}
-                  formatter={(v: number) => fmtMoney(v)}
+                  formatter={(v: number) => fmtMoney(v, currency)}
                 />
                 <Legend
                   wrapperStyle={{ fontSize: 11 }}
@@ -202,7 +204,7 @@ export default function Dashboard() {
                   </div>
                 </div>
                 <div className="mt-1 text-xs text-slate-500 nums">
-                  {fmtMoney(g.current_amount)} of {fmtMoney(g.target_amount)}
+                  {fmtMoney(g.current_amount, currency)} of {fmtMoney(g.target_amount, currency)}
                 </div>
                 <ProgressBar value={g.progress} tone="emerald" className="mt-3" />
               </Card>

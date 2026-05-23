@@ -16,7 +16,9 @@ __pycache__/
 node_modules/
 dist/
 build/
+dist-types/
 .vite/
+*.tsbuildinfo
 *.log
 
 # IDE

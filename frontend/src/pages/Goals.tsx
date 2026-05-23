@@ -6,9 +6,11 @@ import { api } from "../api/client";
 import type { Goal } from "../api/types";
 import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, ProgressBar } from "../components/ui";
 import { fmtMoney } from "../lib/format";
+import { useUserCurrency } from "../lib/useCurrency";
 
 export default function Goals() {
   const qc = useQueryClient();
+  const currency = useUserCurrency();
   const list = useQuery({
     queryKey: ["goals"],
     queryFn: async () => (await api.get<Goal[]>("/api/v1/goals")).data,
@@ -110,10 +112,10 @@ export default function Goals() {
 
                 <div className="mt-3 flex items-baseline gap-2">
                   <span className="text-xl font-bold tracking-tight nums">
-                    {fmtMoney(g.current_amount)}
+                    {fmtMoney(g.current_amount, currency)}
                   </span>
                   <span className="text-xs text-slate-500 nums">
-                    of {fmtMoney(g.target_amount)}
+                    of {fmtMoney(g.target_amount, currency)}
                   </span>
                 </div>
 

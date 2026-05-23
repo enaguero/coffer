@@ -2,7 +2,9 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import extract, func, select
+from pydantic import BaseModel
+from sqlalchemy import extract, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.core.deps import CurrentUser, DbSession
 from app.models.category import Category, CategoryKind
@@ -24,6 +26,7 @@ def list_transactions(
     db: DbSession,
     account_id: int | None = None,
     category_id: int | None = None,
+    uncategorized: bool = False,
     start: date | None = None,
     end: date | None = None,
     limit: int = Query(default=200, le=2000),
@@ -32,7 +35,9 @@ def list_transactions(
     stmt = select(Transaction).where(Transaction.user_id == current.id)
     if account_id is not None:
         stmt = stmt.where(Transaction.account_id == account_id)
-    if category_id is not None:
+    if uncategorized:
+        stmt = stmt.where(Transaction.category_id.is_(None))
+    elif category_id is not None:
         stmt = stmt.where(Transaction.category_id == category_id)
     if start is not None:
         stmt = stmt.where(Transaction.posted_on >= start)
@@ -40,6 +45,43 @@ def list_transactions(
         stmt = stmt.where(Transaction.posted_on <= end)
     stmt = stmt.order_by(Transaction.posted_on.desc(), Transaction.id.desc()).limit(limit).offset(offset)
     return list(db.scalars(stmt))
+
+
+class BulkAssignRequest(BaseModel):
+    transaction_ids: list[int]
+    category_id: int | None
+
+
+class BulkAssignResponse(BaseModel):
+    updated: int
+
+
+@router.post("/bulk-assign", response_model=BulkAssignResponse)
+def bulk_assign_category(
+    payload: BulkAssignRequest, current: CurrentUser, db: DbSession
+) -> BulkAssignResponse:
+    if not payload.transaction_ids:
+        return BulkAssignResponse(updated=0)
+    if payload.category_id is not None:
+        cat = db.get(Category, payload.category_id)
+        if cat is None or cat.user_id != current.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+    try:
+        result = db.execute(
+            update(Transaction)
+            .where(
+                Transaction.user_id == current.id,
+                Transaction.id.in_(payload.transaction_ids),
+            )
+            .values(category_id=payload.category_id)
+        )
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid category assignment"
+        ) from e
+    return BulkAssignResponse(updated=result.rowcount or 0)
 
 
 @router.post("", response_model=TransactionOut, status_code=status.HTTP_201_CREATED)

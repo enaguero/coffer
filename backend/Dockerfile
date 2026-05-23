@@ -24,4 +24,6 @@ RUN mkdir -p /app/uploads
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Production-safe default. docker-compose.yml overrides this with --reload for dev,
+# so a bare `docker run` doesn't silently start the autoreloader in prod.
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

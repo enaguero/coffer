@@ -96,4 +96,75 @@ export interface ImportResponse {
   rows_parsed: number;
   rows_imported: number;
   skipped_duplicates: number;
+  auto_categorized: number;
+}
+
+export interface CategoryRule {
+  id: number;
+  pattern: string;
+  category_id: number;
+  priority: number;
+}
+
+export interface ApplyRulesResponse {
+  rules_evaluated: number;
+  transactions_updated: number;
+}
+
+export type BankConnectionStatus = "pending" | "linked" | "expired" | "revoked";
+
+export interface BankConnection {
+  id: number;
+  provider: "gocardless";
+  institution_id: string;
+  institution_name: string;
+  status: BankConnectionStatus;
+  requisition_expires_at: string | null;
+  created_at: string;
+}
+
+export interface InstitutionRef {
+  id: string;
+  name: string;
+  bic: string | null;
+  countries: string[];
+  logo_url: string | null;
+}
+
+export interface LinkStartResponse {
+  bank_connection_id: number;
+  requisition_id: string;
+  link_url: string;
+}
+
+export interface DiscoveredAccount {
+  external_account_id: string;
+  iban_last4: string | null;
+  name: string | null;
+  currency: string | null;
+}
+
+export interface LinkCompleteResponse {
+  bank_connection_id: number;
+  institution_name: string;
+  accounts: DiscoveredAccount[];
+}
+
+export type SyncJobStatus = "running" | "success" | "failed";
+
+export interface SyncJob {
+  id: number;
+  bank_connection_id: number;
+  account_id: number | null;
+  started_at: string;
+  completed_at: string | null;
+  status: SyncJobStatus;
+  transactions_fetched: number;
+  transactions_imported: number;
+  error_message: string | null;
+}
+
+export interface SyncResponse {
+  sync_job_ids: number[];
+  queued: number;
 }

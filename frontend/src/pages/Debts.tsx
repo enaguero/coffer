@@ -6,9 +6,11 @@ import { api } from "../api/client";
 import type { Debt, DebtSummary } from "../api/types";
 import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, ProgressBar } from "../components/ui";
 import { fmtMoney, toNum } from "../lib/format";
+import { useUserCurrency } from "../lib/useCurrency";
 
 export default function Debts() {
   const qc = useQueryClient();
+  const currency = useUserCurrency();
   const summary = useQuery({
     queryKey: ["debt-summary"],
     queryFn: async () => (await api.get<DebtSummary>("/api/v1/debts/summary")).data,
@@ -66,7 +68,7 @@ export default function Debts() {
     <>
       <PageHeader
         title="Debts"
-        subtitle={`${summary.data?.by_debt.length ?? 0} obligations · ${fmtMoney(totalOwed)} owed`}
+        subtitle={`${summary.data?.by_debt.length ?? 0} obligations · ${fmtMoney(totalOwed, currency)} owed`}
         right={
           <Button onClick={() => setShowForm((s) => !s)}>
             <Plus className="h-4 w-4" />
@@ -82,9 +84,9 @@ export default function Debts() {
               Pay-down progress
             </div>
             <div className="mt-1 text-2xl font-bold tracking-tight nums">
-              {fmtMoney(totalOriginal - totalOwed)}{" "}
+              {fmtMoney(totalOriginal - totalOwed, currency)}{" "}
               <span className="text-base font-medium text-slate-400">
-                of {fmtMoney(totalOriginal)} paid
+                of {fmtMoney(totalOriginal, currency)} paid
               </span>
             </div>
           </div>
@@ -156,8 +158,8 @@ export default function Debts() {
                     )}
                   </div>
                   <div className="mt-1 flex items-baseline gap-2">
-                    <span className="text-xl font-bold tracking-tight nums">{fmtMoney(cur)}</span>
-                    <span className="text-xs text-slate-500 nums">of {fmtMoney(original)}</span>
+                    <span className="text-xl font-bold tracking-tight nums">{fmtMoney(cur, currency)}</span>
+                    <span className="text-xs text-slate-500 nums">of {fmtMoney(original, currency)}</span>
                   </div>
                 </div>
                 <button
@@ -175,7 +177,7 @@ export default function Debts() {
                 <div>
                   <div className="text-slate-500">Min pay</div>
                   <div className="mt-0.5 font-medium nums">
-                    {d.minimum_payment ? fmtMoney(d.minimum_payment) : "—"}
+                    {d.minimum_payment ? fmtMoney(d.minimum_payment, currency) : "—"}
                   </div>
                 </div>
                 <div>

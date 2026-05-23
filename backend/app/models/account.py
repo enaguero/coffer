@@ -1,3 +1,4 @@
+from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy import Enum, ForeignKey, Numeric, String
@@ -28,8 +29,17 @@ class Account(Base, TimestampMixin):
     )
     institution: Mapped[str | None] = mapped_column(String(120))
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
-    opening_balance: Mapped[float] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    opening_balance: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), default=Decimal("0"), nullable=False
+    )
+    # Bank-sync linkage: set when this account is backed by a BankConnection.
+    # Manual accounts leave both NULL.
+    bank_connection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bank_connections.id", ondelete="SET NULL"), index=True
+    )
+    external_account_id: Mapped[str | None] = mapped_column(String(120))
 
     user: Mapped["User"] = relationship(back_populates="accounts")  # noqa: F821
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account", cascade="all, delete-orphan")  # noqa: F821
     debt: Mapped["Debt | None"] = relationship(back_populates="account", uselist=False, cascade="all, delete-orphan")  # noqa: F821
+    bank_connection: Mapped["BankConnection | None"] = relationship(back_populates="accounts")  # noqa: F821

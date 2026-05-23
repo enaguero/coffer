@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 
 import { Button, Input, Label } from "../components/ui";
-import { useAuth } from "../contexts/AuthContext";
+import { useAuth } from "../contexts/useAuth";
 
 export default function Login() {
   const { user, login } = useAuth();

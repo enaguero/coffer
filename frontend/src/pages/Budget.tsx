@@ -6,12 +6,14 @@ import { api } from "../api/client";
 import type { BudgetMonthView } from "../api/types";
 import { Card, Input, PageHeader, StatCard } from "../components/ui";
 import { fmtMoney, MONTH_NAMES, toNum } from "../lib/format";
+import { useUserCurrency } from "../lib/useCurrency";
 
 export default function Budget() {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
   const qc = useQueryClient();
+  const currency = useUserCurrency();
 
   const view = useQuery({
     queryKey: ["budget-month", year, month],
@@ -77,21 +79,21 @@ export default function Budget() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatCard
           label="Income"
-          value={fmtMoney(view.data?.income_actual)}
+          value={fmtMoney(view.data?.income_actual, currency)}
           accent="emerald"
-          hint={`Planned ${fmtMoney(view.data?.income_planned)}`}
+          hint={`Planned ${fmtMoney(view.data?.income_planned, currency)}`}
         />
         <StatCard
           label="Expenses"
-          value={fmtMoney(view.data?.expenses_actual)}
+          value={fmtMoney(view.data?.expenses_actual, currency)}
           accent="rose"
-          hint={`Planned ${fmtMoney(view.data?.expenses_planned)}`}
+          hint={`Planned ${fmtMoney(view.data?.expenses_planned, currency)}`}
         />
         <StatCard
           label="Saving"
-          value={fmtMoney(view.data?.saving_actual)}
+          value={fmtMoney(view.data?.saving_actual, currency)}
           accent="sky"
-          hint={`Planned ${fmtMoney(view.data?.saving_planned)}`}
+          hint={`Planned ${fmtMoney(view.data?.saving_planned, currency)}`}
         />
       </div>
 
@@ -128,13 +130,13 @@ export default function Budget() {
                       className="ml-auto w-32 !py-1 text-right"
                     />
                   </td>
-                  <td className="px-5 py-3 text-right nums text-slate-700">{fmtMoney(actual)}</td>
+                  <td className="px-5 py-3 text-right nums text-slate-700">{fmtMoney(actual, currency)}</td>
                   <td
                     className={`px-5 py-3 text-right nums font-medium ${
                       overBudget ? "text-rose-600" : "text-emerald-600"
                     }`}
                   >
-                    {fmtMoney(diff)}
+                    {fmtMoney(diff, currency)}
                   </td>
                 </tr>
               );

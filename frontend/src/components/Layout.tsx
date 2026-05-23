@@ -1,5 +1,6 @@
 import {
   ArrowUpDown,
+  Banknote,
   CreditCard,
   LayoutDashboard,
   ListTree,
@@ -11,7 +12,7 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
-import { useAuth } from "../contexts/AuthContext";
+import { useAuth } from "../contexts/useAuth";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
@@ -21,6 +22,7 @@ const navItems = [
   { to: "/categories", label: "Categories", icon: ListTree },
   { to: "/debts", label: "Debts", icon: CreditCard },
   { to: "/goals", label: "Goals", icon: Target },
+  { to: "/banks", label: "Banks", icon: Banknote },
   { to: "/import", label: "Import", icon: Upload },
 ];
 

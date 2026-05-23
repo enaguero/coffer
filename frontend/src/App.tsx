@@ -3,6 +3,8 @@ import { Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Accounts from "./pages/Accounts";
+import BankCallback from "./pages/BankCallback";
+import BankConnections from "./pages/BankConnections";
 import Budget from "./pages/Budget";
 import Categories from "./pages/Categories";
 import Dashboard from "./pages/Dashboard";
@@ -27,6 +29,8 @@ export default function App() {
           <Route path="categories" element={<Categories />} />
           <Route path="debts" element={<Debts />} />
           <Route path="goals" element={<Goals />} />
+          <Route path="banks" element={<BankConnections />} />
+          <Route path="banks/callback" element={<BankCallback />} />
           <Route path="import" element={<Import />} />
         </Route>
       </Route>

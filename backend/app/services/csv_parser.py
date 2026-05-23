@@ -8,8 +8,8 @@ confidently parse is skipped and reported in the response.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from io import StringIO

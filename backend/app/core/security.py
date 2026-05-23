@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
-from jose import JWTError, jwt
+import jwt
 
 from app.core.config import settings
 
@@ -37,5 +37,5 @@ def create_access_token(subject: str | int, extra: dict[str, Any] | None = None)
 def decode_token(token: str) -> dict[str, Any]:
     try:
         return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-    except JWTError as e:
+    except jwt.PyJWTError as e:
         raise ValueError("Invalid token") from e

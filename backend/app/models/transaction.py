@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from sqlalchemy import Date, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -19,7 +20,7 @@ class Transaction(Base, TimestampMixin):
 
     posted_on: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False)
-    amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     # Positive = inflow, negative = outflow. Keep raw sign from the statement.
     notes: Mapped[str | None] = mapped_column(String(1000))
     external_id: Mapped[str | None] = mapped_column(String(120), index=True)

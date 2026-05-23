@@ -30,3 +30,4 @@ class Category(Base, TimestampMixin):
     user: Mapped["User"] = relationship(back_populates="categories")  # noqa: F821
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")  # noqa: F821
     budget_entries: Mapped[list["BudgetEntry"]] = relationship(back_populates="category", cascade="all, delete-orphan")  # noqa: F821
+    rules: Mapped[list["CategoryRule"]] = relationship(back_populates="category", cascade="all, delete-orphan")  # noqa: F821
