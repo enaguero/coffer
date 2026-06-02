@@ -3,6 +3,7 @@ import {
   Banknote,
   CreditCard,
   LayoutDashboard,
+  LineChart,
   ListTree,
   LogOut,
   PiggyBank,
@@ -17,6 +18,7 @@ import { useAuth } from "../contexts/useAuth";
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/budget", label: "Budget", icon: PiggyBank },
+  { to: "/cashflow", label: "Cashflow", icon: LineChart },
   { to: "/transactions", label: "Transactions", icon: ArrowUpDown },
   { to: "/accounts", label: "Accounts", icon: Wallet },
   { to: "/categories", label: "Categories", icon: ListTree },

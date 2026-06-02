@@ -6,6 +6,7 @@ import Accounts from "./pages/Accounts";
 import BankCallback from "./pages/BankCallback";
 import BankConnections from "./pages/BankConnections";
 import Budget from "./pages/Budget";
+import Cashflow from "./pages/Cashflow";
 import Categories from "./pages/Categories";
 import Dashboard from "./pages/Dashboard";
 import Debts from "./pages/Debts";
@@ -24,6 +25,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="budget" element={<Budget />} />
+          <Route path="cashflow" element={<Cashflow />} />
           <Route path="transactions" element={<Transactions />} />
           <Route path="accounts" element={<Accounts />} />
           <Route path="categories" element={<Categories />} />

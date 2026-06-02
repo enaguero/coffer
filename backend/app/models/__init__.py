@@ -2,6 +2,7 @@ from app.models.account import Account
 from app.models.bank_connection import BankConnection
 from app.models.base import Base
 from app.models.budget import BudgetEntry
+from app.models.cashflow import CashflowEntry, CashflowLine
 from app.models.category import Category
 from app.models.category_rule import CategoryRule
 from app.models.debt import Debt
@@ -21,6 +22,8 @@ __all__ = [
     "Transaction",
     "Debt",
     "BudgetEntry",
+    "CashflowLine",
+    "CashflowEntry",
     "Goal",
     "StatementImport",
     "SyncJob",

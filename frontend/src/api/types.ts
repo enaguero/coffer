@@ -168,3 +168,54 @@ export interface SyncResponse {
   sync_job_ids: number[];
   queued: number;
 }
+
+export type CashflowKind = "income" | "expense";
+
+export interface CashflowEntryIn {
+  year: number;
+  month: number;
+  amount: string;
+}
+
+export interface CashflowLine {
+  id: number;
+  name: string;
+  kind: CashflowKind;
+  country: string;
+  currency: string;
+  account_id: number | null;
+  category_id: number | null;
+  sort_order: number;
+  is_active: boolean;
+  notes: string | null;
+  entries: CashflowEntryIn[];
+}
+
+export interface CashflowMonth {
+  year: number;
+  month: number;
+}
+
+export interface CashflowMonthTotal extends CashflowMonth {
+  income: string;
+  expense: string;
+  net: string;
+}
+
+export interface CashflowCurrencyTotals {
+  currency: string;
+  months: CashflowMonthTotal[];
+}
+
+export interface CashflowGrid {
+  months: CashflowMonth[];
+  lines: CashflowLine[];
+  totals_by_currency: CashflowCurrencyTotals[];
+}
+
+export interface CashflowEntryUpsert {
+  line_id: number;
+  year: number;
+  month: number;
+  amount: number | string;
+}

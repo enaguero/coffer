@@ -1,4 +1,4 @@
-.PHONY: up down logs ps build rebuild restart bash-backend bash-frontend bash-db migrate makemigration seed seed-reset fresh test-backend clean
+.PHONY: up down logs ps build rebuild restart bash-backend bash-frontend bash-db migrate makemigration seed seed-reset seed-cashflow seed-cashflow-reset fresh test-backend clean
 
 up:
 	docker compose up -d
@@ -43,6 +43,12 @@ seed:
 seed-reset:
 	docker compose exec backend uv run python -m app.seed --reset
 
+seed-cashflow:
+	docker compose exec backend uv run python -m app.seed_cashflow
+
+seed-cashflow-reset:
+	docker compose exec backend uv run python -m app.seed_cashflow --reset
+
 # Wipes the database volume, rebuilds images, restarts everything, runs migrations, loads seed.
 fresh:
 	@echo "==> Stopping services and removing volumes…"
@@ -61,6 +67,7 @@ fresh:
 	done
 	@echo "==> Loading seed data…"
 	docker compose exec -T backend uv run python -m app.seed
+	docker compose exec -T backend uv run python -m app.seed_cashflow
 	@echo ""
 	@echo "Done. Sign in at http://localhost:5173"
 	@echo "  Email:    demo@coffer.dev"

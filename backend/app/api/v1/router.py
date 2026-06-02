@@ -5,6 +5,7 @@ from app.api.v1 import (
     auth,
     bank_connections,
     budgets,
+    cashflow,
     categories,
     category_rules,
     debts,
@@ -24,3 +25,4 @@ api_router.include_router(budgets.router)
 api_router.include_router(goals.router)
 api_router.include_router(imports.router)
 api_router.include_router(bank_connections.router)
+api_router.include_router(cashflow.router)
