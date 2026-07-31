@@ -7,21 +7,24 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import AccountType
+from app.models.account import Account, AccountType
 from app.models.debt import Debt
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.insights import (
     AllocationOptionOut,
+    AllowanceMeterOut,
+    AllowancesOut,
     ForecastOut,
     NetWorthOut,
     RecurringItemOut,
     SurplusOut,
 )
 from app.services.account_loader import load_account_data
+from app.services.analytics.allowances import compute_allowances, tax_year_bounds
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
@@ -125,6 +128,58 @@ def networth(
         liabilities=report.liabilities,
         net=report.net,
         series=[asdict(p) for p in report.series],
+    )
+
+
+@router.get("/allowances", response_model=AllowancesOut)
+def allowances(current: CurrentUser, db: DbSession) -> AllowancesOut:
+    """UK tax-year allowance meters, from contributions into wrapper-tagged
+    accounts (positive transactions within the current tax year)."""
+    today = date.today()
+    start, end = tax_year_bounds(today)
+
+    wrapped = db.execute(
+        select(Account.id, Account.uk_wrapper).where(Account.user_id == current.id, Account.uk_wrapper.isnot(None))
+    ).all()
+    wrapper_by_account = {account_id: wrapper for account_id, wrapper in wrapped}
+
+    contributions: dict = {}
+    if wrapper_by_account:
+        rows = db.execute(
+            select(Transaction.account_id, func.coalesce(func.sum(Transaction.amount), 0))
+            .where(
+                Transaction.user_id == current.id,
+                Transaction.account_id.in_(wrapper_by_account),
+                Transaction.amount > 0,
+                Transaction.posted_on >= start,
+                Transaction.posted_on <= min(end, today),
+            )
+            .group_by(Transaction.account_id)
+        ).all()
+        for account_id, total in rows:
+            wrapper = wrapper_by_account[account_id]
+            contributions[wrapper] = contributions.get(wrapper, Decimal("0")) + total
+        # Wrappers with tagged accounts but no contributions yet still get a
+        # meter at £0 — the countdown is the point.
+        for wrapper in wrapper_by_account.values():
+            contributions.setdefault(wrapper, Decimal("0"))
+
+    meters = compute_allowances(contributions)
+    return AllowancesOut(
+        tax_year_start=start,
+        tax_year_end=end,
+        days_left=(end - today).days,
+        meters=[
+            AllowanceMeterOut(
+                wrapper=m.wrapper.value,
+                allowance=m.allowance,
+                used=m.used,
+                remaining=m.remaining,
+                lisa_portion=m.lisa_portion,
+            )
+            for m in meters
+        ],
+        wrapped_account_count=len(wrapper_by_account),
     )
 
 

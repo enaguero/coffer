@@ -15,14 +15,33 @@ export interface User {
   full_name: string | null;
 }
 
+export type UkWrapper = "isa" | "lisa" | "pension";
+
 export interface Account {
   id: number;
   name: string;
   type: AccountType;
   institution: string | null;
   bank_id: string | null;
+  uk_wrapper: UkWrapper | null;
   currency: string;
   opening_balance: string;
+}
+
+export interface AllowanceMeter {
+  wrapper: UkWrapper | string;
+  allowance: string;
+  used: string;
+  remaining: string;
+  lisa_portion: string;
+}
+
+export interface Allowances {
+  tax_year_start: string;
+  tax_year_end: string;
+  days_left: number;
+  meters: AllowanceMeter[];
+  wrapped_account_count: number;
 }
 
 export interface UkBank {

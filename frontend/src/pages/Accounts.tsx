@@ -3,7 +3,7 @@ import { Plus, Trash2, Wallet } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
 import { api } from "../api/client";
-import type { Account, AccountType, UkBank } from "../api/types";
+import type { Account, AccountType, UkBank, UkWrapper } from "../api/types";
 import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, Select } from "../components/ui";
 import { fmtMoney } from "../lib/format";
 
@@ -50,6 +50,7 @@ export default function Accounts() {
   const [institution, setInstitution] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [opening, setOpening] = useState("0");
+  const [wrapper, setWrapper] = useState("");
 
   const selectedBank = banks.data?.find((b) => b.id === bankId) ?? null;
   const typeOptions = selectedBank ? selectedBank.account_types : ALL_TYPES;
@@ -71,12 +72,13 @@ export default function Accounts() {
         name, type,
         institution: institution || null,
         bank_id: bankId || null,
+        uk_wrapper: (wrapper || null) as UkWrapper | null,
         currency,
         opening_balance: opening as unknown as string,
       },
       {
         onSuccess: () => {
-          setName(""); setBankId(""); setInstitution(""); setOpening("0");
+          setName(""); setBankId(""); setInstitution(""); setOpening("0"); setWrapper("");
           setShowForm(false);
         },
       },
@@ -133,6 +135,15 @@ export default function Accounts() {
               <Label>Opening balance</Label>
               <Input value={opening} onChange={(e) => setOpening(e.target.value)} />
             </label>
+            <label>
+              <Label>UK tax wrapper</Label>
+              <Select value={wrapper} onChange={(e) => setWrapper(e.target.value)}>
+                <option value="">None</option>
+                <option value="isa">ISA</option>
+                <option value="lisa">Lifetime ISA</option>
+                <option value="pension">Pension</option>
+              </Select>
+            </label>
             <div className="md:col-span-6">
               <Button type="submit">Save account</Button>
               {selectedBank && (
@@ -175,6 +186,9 @@ export default function Accounts() {
                     {a.institution ?? "—"}
                     {a.bank_id && (
                       <span className="ml-2 text-xs text-slate-400">preset</span>
+                    )}
+                    {a.uk_wrapper && (
+                      <Badge tone="sky">{a.uk_wrapper === "lisa" ? "LISA" : a.uk_wrapper.toUpperCase()}</Badge>
                     )}
                   </td>
                   <td className="px-5 py-3 text-right nums">

@@ -17,6 +17,14 @@ class AccountType(StrEnum):
     OTHER = "other"
 
 
+class UkWrapper(StrEnum):
+    """UK tax wrapper an account sits inside — drives tax-year allowance metering."""
+
+    ISA = "isa"
+    LISA = "lisa"
+    PENSION = "pension"
+
+
 class Account(Base, TimestampMixin):
     __tablename__ = "accounts"
 
@@ -32,6 +40,10 @@ class Account(Base, TimestampMixin):
     # account belongs to a known bank; drives statement-import preset selection.
     # NULL for manual/unlisted institutions.
     bank_id: Mapped[str | None] = mapped_column(String(50))
+    # UK tax wrapper (ISA/LISA/pension) — NULL for unwrapped accounts.
+    uk_wrapper: Mapped[UkWrapper | None] = mapped_column(
+        Enum(UkWrapper, name="uk_wrapper", values_callable=lambda e: [m.value for m in e])
+    )
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     opening_balance: Mapped[Decimal] = mapped_column(
         Numeric(14, 2), default=Decimal("0"), nullable=False
