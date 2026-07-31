@@ -37,6 +37,19 @@ class DebtInput:
     promo_ends_on: date | None = None
     minimum_payment: Decimal | None = None
 
+    @classmethod
+    def from_model(cls, d) -> DebtInput:
+        """Build from a Debt ORM row (duck-typed — keeps this module ORM-free)."""
+        return cls(
+            id=d.id,
+            name=d.name,
+            balance=d.current_balance,
+            apr=d.interest_rate_apr,
+            promo_apr=d.promo_apr,
+            promo_ends_on=d.promo_ends_on,
+            minimum_payment=d.minimum_payment,
+        )
+
 
 @dataclass
 class DebtResult:

@@ -24,6 +24,15 @@ from app.services.analytics.debt_plan import DebtInput, effective_apr
 TWO_DP = Decimal("0.01")
 
 
+def latest_complete_month(dates: list[date], today: date) -> tuple[int, int] | None:
+    """The most recent (year, month) strictly before today's month that has
+    data, or None. Shared by the surplus endpoint and the digest so both talk
+    about the same month."""
+    months = sorted({(d.year, d.month) for d in dates})
+    complete = [m for m in months if m < (today.year, today.month)]
+    return complete[-1] if complete else None
+
+
 @dataclass
 class MonthSummary:
     year: int

@@ -143,6 +143,18 @@ class AllowancesOut(BaseModel):
     wrapped_account_count: int
 
 
+class DigestOut(BaseModel):
+    subject: str
+    body: str
+    item_count: int
+    smtp_configured: bool
+
+
+class DigestSendOut(BaseModel):
+    sent_to: str
+    subject: str
+
+
 class AccountCoverageOut(BaseModel):
     account_id: int
     name: str

@@ -2,9 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Defaults that must never reach a non-dev environment. Keep this list in sync
 # with placeholders shipped in .env.example and docker-compose.yml.
-_FORBIDDEN_JWT_SECRETS = frozenset(
-    {"", "change-me", "change-me-in-production", "replace-with-a-long-random-string"}
-)
+_FORBIDDEN_JWT_SECRETS = frozenset({"", "change-me", "change-me-in-production", "replace-with-a-long-random-string"})
 
 
 class Settings(BaseSettings):
@@ -19,6 +17,20 @@ class Settings(BaseSettings):
     # Set to "dev" / "test" to allow the placeholder JWT secret. Anything else
     # (including unset) is treated as production and refuses to boot with a weak secret.
     coffer_env: str = "production"
+
+    # Weekly digest email (optional). Unset SMTP_HOST disables sending; the
+    # in-app preview endpoint works regardless. Digests go to each user's own
+    # login email. Send via cron: `docker compose exec backend uv run python -m app.digest`
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None  # defaults to smtp_username when unset
+    smtp_starttls: bool = True
+
+    @property
+    def smtp_configured(self) -> bool:
+        return bool(self.smtp_host)
 
     @property
     def cors_origin_list(self) -> list[str]:
