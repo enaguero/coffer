@@ -2,16 +2,18 @@
 worth, and the monthly surplus allocator. All computation lives in
 services/analytics; this layer fetches rows and serializes results."""
 
+import smtplib
 from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import Account, AccountType, UkWrapper
+from app.core.rate_limit import limiter
+from app.models.account import LIQUID_ACCOUNT_TYPES, Account, UkWrapper
 from app.models.debt import Debt
 from app.models.goal import Goal
 from app.models.transaction import Transaction
@@ -31,40 +33,21 @@ from app.services.analytics.allowances import compute_allowances, tax_year_bound
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
-from app.services.analytics.recurring import TxnLite, detect_raises, detect_recurring
-from app.services.analytics.surplus import rank_allocations, summarize_month
+from app.services.analytics.recurring import detect_raises, detect_recurring
+from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
 from app.services.digest import compose_digest, send_email
 
 router = APIRouter(prefix="/insights", tags=["insights"])
 
-# Cash you can actually spend — excludes OTHER (manual valuations: house,
-# pension) and liability accounts.
-LIQUID_TYPES = {AccountType.CHECKING, AccountType.SAVINGS, AccountType.CASH}
-
-
-def _txn_lites(db, user_id: int) -> list[TxnLite]:
-    return load_txn_lites(db, user_id)
-
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
     debts = db.scalars(select(Debt).where(Debt.user_id == user_id)).all()
-    return [
-        DebtInput(
-            id=d.id,
-            name=d.name,
-            balance=d.current_balance,
-            apr=d.interest_rate_apr,
-            promo_apr=d.promo_apr,
-            promo_ends_on=d.promo_ends_on,
-            minimum_payment=d.minimum_payment,
-        )
-        for d in debts
-    ]
+    return [DebtInput.from_model(d) for d in debts]
 
 
 @router.get("/recurring", response_model=list[RecurringItemOut])
 def recurring(current: CurrentUser, db: DbSession) -> list[RecurringItemOut]:
-    items = detect_recurring(_txn_lites(db, current.id))
+    items = detect_recurring(load_txn_lites(db, current.id))
     return [
         RecurringItemOut(**{k: v for k, v in asdict(i).items() if k not in {"merchant_key", "amounts"}}) for i in items
     ]
@@ -77,10 +60,10 @@ def forecast(
     days: int = Query(default=60, ge=7, le=365),
     reserve: Decimal = Query(default=Decimal("0"), ge=0),
 ) -> ForecastOut:
-    items = detect_recurring(_txn_lites(db, current.id))
+    items = detect_recurring(load_txn_lites(db, current.id))
     account_data = load_account_data(db, current.id)
     start = sum(
-        (current_balance(a).balance for a in account_data if a.type in LIQUID_TYPES),
+        (current_balance(a).balance for a in account_data if a.type in LIQUID_ACCOUNT_TYPES),
         Decimal("0"),
     )
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
@@ -175,7 +158,8 @@ def digest_preview(current: CurrentUser, db: DbSession) -> DigestOut:
 
 
 @router.post("/digest/send", response_model=DigestSendOut)
-def digest_send(current: CurrentUser, db: DbSession) -> DigestSendOut:
+@limiter.limit("5/hour")
+def digest_send(request: Request, current: CurrentUser, db: DbSession) -> DigestSendOut:
     """Compose and email the digest to the signed-in user's address now."""
     if not settings.smtp_configured:
         raise HTTPException(
@@ -183,7 +167,13 @@ def digest_send(current: CurrentUser, db: DbSession) -> DigestSendOut:
             detail="SMTP is not configured — set SMTP_HOST in .env",
         )
     digest = compose_digest(db, current)
-    send_email(current.email, digest.subject, digest.body)
+    try:
+        send_email(current.email, digest.subject, digest.body)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"SMTP send failed: {exc.__class__.__name__}",
+        ) from exc
     return DigestSendOut(sent_to=current.email, subject=digest.subject)
 
 
@@ -203,13 +193,14 @@ def surplus(
     txn_tuples = [(p, a, c) for p, a, c in txns]
 
     if year is None or month is None:
-        # Default to the latest month that is complete (i.e. before the current
-        # calendar month) and has transactions; fall back to the latest month
-        # with any data at all.
+        # The latest complete month with data; fall back to the latest month
+        # with any data at all (same helper the digest uses).
         today = date.today()
-        candidates = sorted({(p.year, p.month) for p, _, _ in txn_tuples})
-        complete = [c for c in candidates if c < (today.year, today.month)]
-        year, month = (complete or candidates or [(today.year, today.month)])[-1]
+        picked = latest_complete_month([p for p, _, _ in txn_tuples], today)
+        if picked is None:
+            candidates = sorted({(p.year, p.month) for p, _, _ in txn_tuples})
+            picked = (candidates or [(today.year, today.month)])[-1]
+        year, month = picked
 
     summary = summarize_month(txn_tuples, year, month)
 
@@ -248,7 +239,7 @@ def surplus(
 
     options = rank_allocations(considered, _debt_inputs(db, current.id), goal_tuples, floor) if considered > 0 else []
 
-    items = detect_recurring(_txn_lites(db, current.id))
+    items = detect_recurring(load_txn_lites(db, current.id))
     raises = detect_raises(items)
 
     return SurplusOut(

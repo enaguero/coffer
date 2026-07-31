@@ -17,6 +17,12 @@ class AccountType(StrEnum):
     OTHER = "other"
 
 
+# Cash the owner can actually spend — excludes liability accounts and OTHER
+# (manual valuations: house, pension). Single source of truth for the forecast
+# start balance and the digest's low-balance warning.
+LIQUID_ACCOUNT_TYPES = frozenset({AccountType.CHECKING, AccountType.SAVINGS, AccountType.CASH})
+
+
 class UkWrapper(StrEnum):
     """UK tax wrapper an account sits inside — drives tax-year allowance metering."""
 
@@ -45,9 +51,7 @@ class Account(Base, TimestampMixin):
         Enum(UkWrapper, name="uk_wrapper", values_callable=lambda e: [m.value for m in e])
     )
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
-    opening_balance: Mapped[Decimal] = mapped_column(
-        Numeric(14, 2), default=Decimal("0"), nullable=False
-    )
+    opening_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="accounts")  # noqa: F821
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account", cascade="all, delete-orphan")  # noqa: F821

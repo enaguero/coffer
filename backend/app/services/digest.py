@@ -14,31 +14,31 @@ same body backs the in-app preview endpoint.
 from __future__ import annotations
 
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from email.message import EmailMessage
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.account import Account
+from app.models.account import LIQUID_ACCOUNT_TYPES
 from app.models.debt import Debt
-from app.models.transaction import Transaction
 from app.models.user import User
 from app.services.account_loader import load_account_data, load_txn_lites
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
-from app.services.analytics.surplus import rank_allocations, summarize_month
+from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
 
 STALE_AFTER_DAYS = 35
 PROMO_WARNING_DAYS = 60
 BILL_LOOKAHEAD_DAYS = 7
 RENEWAL_LOOKAHEAD_DAYS = 14
-LIQUID_TYPES = {"checking", "savings", "cash"}
+MAX_BILL_LINES = 8
 
 
 @dataclass
@@ -56,18 +56,17 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     today = today or date.today()
     sections: list[str] = []
 
+    # One data load feeds freshness, the accounts list, and the forecast start.
+    account_data = load_account_data(db, user.id)
+
     # --- Data freshness -------------------------------------------------------
-    last_txn_by_account = dict(
-        db.execute(
-            select(Transaction.account_id, func.max(Transaction.posted_on))
-            .where(Transaction.user_id == user.id)
-            .group_by(Transaction.account_id)
-        ).all()
-    )
-    accounts = list(db.scalars(select(Account).where(Account.user_id == user.id)))
+    # Fresh = a recent transaction OR a recent balance snapshot: valuation-only
+    # accounts (house, pension) are maintained by snapshots, not statements.
     stale = []
-    for a in accounts:
-        last = last_txn_by_account.get(a.id)
+    for a in account_data:
+        last_txn = a.txns[-1][0] if a.txns else None
+        last_snap = a.snapshots[-1][0] if a.snapshots else None
+        last = max(d for d in (last_txn, last_snap) if d is not None) if (last_txn or last_snap) else None
         if last is None or (today - last).days > STALE_AFTER_DAYS:
             stale.append(f"  - {a.name}: {'no data yet' if last is None else f'nothing since {last}'}")
     if stale:
@@ -97,16 +96,23 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     bills = [
         i for i in active if not i.is_income and today <= i.next_expected <= today + timedelta(days=BILL_LOOKAHEAD_DAYS)
     ]
+    # Renewals due within the bill window are already listed above — don't
+    # count one charge as two things.
     renewals = [
         i
         for i in active
         if not i.is_income
         and i.cadence in {"quarterly", "annual"}
-        and today <= i.next_expected <= today + timedelta(days=RENEWAL_LOOKAHEAD_DAYS)
+        and today + timedelta(days=BILL_LOOKAHEAD_DAYS)
+        < i.next_expected
+        <= today + timedelta(days=RENEWAL_LOOKAHEAD_DAYS)
     ]
     if bills:
         total = sum((-i.typical_amount for i in bills), Decimal("0"))
-        lines = [f"  - {i.next_expected}: {i.description} ({_fmt(-i.typical_amount)})" for i in bills[:8]]
+        lines = [f"  - {i.next_expected}: {i.description} ({_fmt(-i.typical_amount)})" for i in bills[:MAX_BILL_LINES]]
+        if len(bills) > MAX_BILL_LINES:
+            hidden = sum((-i.typical_amount for i in bills[MAX_BILL_LINES:]), Decimal("0"))
+            lines.append(f"  - ... and {len(bills) - MAX_BILL_LINES} more totalling {_fmt(hidden)}")
         sections.append(f"NEXT {BILL_LOOKAHEAD_DAYS} DAYS — {_fmt(total)} of known bills:\n" + "\n".join(lines))
     if renewals:
         lines = [
@@ -116,9 +122,8 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
         sections.append("RENEWALS COMING — cancel before they charge:\n" + "\n".join(lines))
 
     # --- Projected low balance ------------------------------------------------
-    account_data = load_account_data(db, user.id)
     start_balance = sum(
-        (current_balance(a).balance for a in account_data if a.type.value in LIQUID_TYPES),
+        (current_balance(a).balance for a in account_data if a.type in LIQUID_ACCOUNT_TYPES),
         Decimal("0"),
     )
     forecast = project(start_balance, items, days=30, today=today)
@@ -140,10 +145,9 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
         )
     else:
         txn_tuples = [(t.posted_on, t.amount, t.category_id) for t in txns]
-        months = sorted({(t.posted_on.year, t.posted_on.month) for t in txns})
-        complete = [m for m in months if m < (today.year, today.month)]
-        if complete:
-            year, month = complete[-1]
+        picked = latest_complete_month([t.posted_on for t in txns], today)
+        if picked is not None:
+            year, month = picked
             summary = summarize_month(txn_tuples, year, month)
             if summary.surplus > 0:
                 # Debt-first for the emailed action; the full ranked list
@@ -158,7 +162,9 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
                 if options:
                     o = options[0]
                     action = (
-                        f"Last month closed with {_fmt(summary.surplus)} spare. Best destination: {o.name} — {o.note}."
+                        f"Last month closed with {_fmt(summary.surplus)} spare. "
+                        f"Highest-interest debt: {o.name} — {o.note}. "
+                        "(The Dashboard also ranks your goals and emergency runway.)"
                     )
                 else:
                     action = (
@@ -203,7 +209,9 @@ def send_email(to: str, subject: str, body: str) -> None:
     msg.set_content(body)
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
         if settings.smtp_starttls:
-            smtp.starttls()
+            # Explicit context: smtplib's default skips certificate verification,
+            # which would hand credentials to any on-path attacker.
+            smtp.starttls(context=ssl.create_default_context())
         if settings.smtp_username and settings.smtp_password:
             smtp.login(settings.smtp_username, settings.smtp_password)
         smtp.send_message(msg)

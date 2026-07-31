@@ -3,6 +3,16 @@
 from datetime import date, timedelta
 from io import BytesIO
 
+import pytest
+
+from app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _smtp_unconfigured(monkeypatch):
+    """Force SMTP off so tests never depend on ambient .env or send real mail."""
+    monkeypatch.setattr(settings, "smtp_host", None)
+
 
 def _account(client, headers, name="Current", type_="checking") -> int:
     r = client.post(
@@ -38,8 +48,8 @@ def test_digest_preview_composes_sections(auth_client) -> None:
         first = today.replace(day=1)
         for _ in range(i - 1):
             first = (first - timedelta(days=1)).replace(day=1)
-        rows.append((first.replace(day=min(15, 28)), "RENT PAYMENT", "-800"))
-        rows.append((first.replace(day=min(14, 28)), "ACME SALARY", "2500"))
+        rows.append((first.replace(day=15), "RENT PAYMENT", "-800"))
+        rows.append((first.replace(day=14), "ACME SALARY", "2500"))
     _import_csv(client, headers, account_id, rows)
 
     # A promo cliff inside the 60-day window.

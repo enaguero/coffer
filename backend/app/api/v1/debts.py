@@ -68,18 +68,7 @@ def plan_payoff(payload: PlanRequest, current: CurrentUser, db: DbSession) -> Pl
     """Simulate paying off all open debts: minimums-only baseline vs snowball
     vs avalanche with the requested extra budget and one-off payments."""
     debts = list(db.scalars(select(Debt).where(Debt.user_id == current.id)))
-    inputs = [
-        DebtInput(
-            id=d.id,
-            name=d.name,
-            balance=d.current_balance,
-            apr=d.interest_rate_apr,
-            promo_apr=d.promo_apr,
-            promo_ends_on=d.promo_ends_on,
-            minimum_payment=d.minimum_payment,
-        )
-        for d in debts
-    ]
+    inputs = [DebtInput.from_model(d) for d in debts]
     snowflakes = {s.month: s.amount for s in payload.snowflakes}
     results = compare_strategies(inputs, payload.extra_monthly, snowflakes)
     baseline = results["minimum"]
