@@ -131,7 +131,7 @@ export default function Import() {
       setPreview(null);
       setFile(null);
       // An import changes balances everywhere derived data is cached.
-      for (const key of ["transactions", "goals", "networth", "surplus", "coverage", "recurring", "forecast"]) {
+      for (const key of ["transactions", "goals", "networth", "surplus", "coverage", "recurring", "forecast", "allowances"]) {
         qc.invalidateQueries({ queryKey: [key] });
       }
     },

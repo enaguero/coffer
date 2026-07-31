@@ -7,10 +7,10 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import Account, AccountType
+from app.models.account import Account, AccountType, UkWrapper
 from app.models.debt import Debt
 from app.models.goal import Goal
 from app.models.transaction import Transaction
@@ -23,7 +23,7 @@ from app.schemas.insights import (
     RecurringItemOut,
     SurplusOut,
 )
-from app.services.account_loader import load_account_data
+from app.services.account_loader import load_account_data, sum_positive_inflows
 from app.services.analytics.allowances import compute_allowances, tax_year_bounds
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
@@ -134,51 +134,37 @@ def networth(
 @router.get("/allowances", response_model=AllowancesOut)
 def allowances(current: CurrentUser, db: DbSession) -> AllowancesOut:
     """UK tax-year allowance meters, from contributions into wrapper-tagged
-    accounts (positive transactions within the current tax year)."""
+    accounts (positive transactions within the current tax year; rows described
+    as interest are excluded — interest is not an HMRC subscription)."""
     today = date.today()
     start, end = tax_year_bounds(today)
 
+    # Allowances are GBP-denominated; non-GBP accounts are excluded outright
+    # (tagging them is also rejected at the API — belt and braces).
     wrapped = db.execute(
-        select(Account.id, Account.uk_wrapper).where(Account.user_id == current.id, Account.uk_wrapper.isnot(None))
+        select(Account.id, Account.uk_wrapper).where(
+            Account.user_id == current.id,
+            Account.uk_wrapper.isnot(None),
+            Account.currency == "GBP",
+        )
     ).all()
     wrapper_by_account = {account_id: wrapper for account_id, wrapper in wrapped}
 
-    contributions: dict = {}
-    if wrapper_by_account:
-        rows = db.execute(
-            select(Transaction.account_id, func.coalesce(func.sum(Transaction.amount), 0))
-            .where(
-                Transaction.user_id == current.id,
-                Transaction.account_id.in_(wrapper_by_account),
-                Transaction.amount > 0,
-                Transaction.posted_on >= start,
-                Transaction.posted_on <= min(end, today),
-            )
-            .group_by(Transaction.account_id)
-        ).all()
-        for account_id, total in rows:
-            wrapper = wrapper_by_account[account_id]
-            contributions[wrapper] = contributions.get(wrapper, Decimal("0")) + total
-        # Wrappers with tagged accounts but no contributions yet still get a
-        # meter at £0 — the countdown is the point.
-        for wrapper in wrapper_by_account.values():
-            contributions.setdefault(wrapper, Decimal("0"))
+    inflows = sum_positive_inflows(
+        db, current.id, wrapper_by_account, start, end, exclude_description_like="%interest%"
+    )
+    contributions: dict[UkWrapper, Decimal] = {wrapper: Decimal("0") for wrapper in wrapper_by_account.values()}
+    for account_id, total in inflows.items():
+        contributions[wrapper_by_account[account_id]] += total
 
     meters = compute_allowances(contributions)
     return AllowancesOut(
         tax_year_start=start,
         tax_year_end=end,
-        days_left=(end - today).days,
-        meters=[
-            AllowanceMeterOut(
-                wrapper=m.wrapper.value,
-                allowance=m.allowance,
-                used=m.used,
-                remaining=m.remaining,
-                lisa_portion=m.lisa_portion,
-            )
-            for m in meters
-        ],
+        # Inclusive: the last day of the tax year reads "1 day left", not 0 —
+        # contributions made that day still count.
+        days_left=(end - today).days + 1,
+        meters=[AllowanceMeterOut(**asdict(m)) for m in meters],
         wrapped_account_count=len(wrapper_by_account),
     )
 

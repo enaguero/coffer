@@ -2,14 +2,13 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
 from app.models.account import Account, AccountType
 from app.models.goal import Goal
-from app.models.transaction import Transaction
 from app.schemas.goal import GoalCreate, GoalOut, GoalUpdate
-from app.services.account_loader import load_account_data
+from app.services.account_loader import load_account_data, sum_positive_inflows
 from app.services.analytics.goal_funding import compute_funding
 from app.services.analytics.net_worth import current_balance
 
@@ -26,23 +25,8 @@ def _linked_balances(db, user_id: int, account_ids: set[int]) -> dict[int, Decim
 
 
 def _funded_this_month(db, user_id: int, account_ids: set[int], today: date) -> dict[int, Decimal]:
-    if not account_ids:
-        return {}
-    # Linked accounts with no contributions this month report £0, not "unknown".
-    totals = {account_id: Decimal("0") for account_id in account_ids}
-    rows = db.execute(
-        select(Transaction.account_id, func.sum(Transaction.amount))
-        .where(
-            Transaction.user_id == user_id,
-            Transaction.account_id.in_(account_ids),
-            Transaction.amount > 0,
-            Transaction.posted_on >= today.replace(day=1),
-            Transaction.posted_on <= today,
-        )
-        .group_by(Transaction.account_id)
-    ).all()
-    totals.update(dict(rows))
-    return totals
+    # Zero-prefilled: linked accounts with no contributions report £0, not "unknown".
+    return sum_positive_inflows(db, user_id, account_ids, today.replace(day=1), today)
 
 
 def _serialize(goal: Goal, balances: dict[int, Decimal], funded: dict[int, Decimal], today: date) -> GoalOut:

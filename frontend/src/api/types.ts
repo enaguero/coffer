@@ -29,7 +29,7 @@ export interface Account {
 }
 
 export interface AllowanceMeter {
-  wrapper: UkWrapper | string;
+  wrapper: UkWrapper;
   allowance: string;
   used: string;
   remaining: string;

@@ -44,6 +44,9 @@ export default function NetWorth() {
   const allowances = useQuery({
     queryKey: ["allowances"],
     queryFn: async () => (await api.get<Allowances>("/api/v1/insights/allowances")).data,
+    // Only ask once the accounts list shows a wrapped account — saves a wasted
+    // request for users with no UK wrappers.
+    enabled: accounts.data?.some((a) => a.uk_wrapper != null) ?? false,
   });
 
   const [valAccount, setValAccount] = useState("");
@@ -187,8 +190,10 @@ export default function NetWorth() {
             })}
           </div>
           <p className="mt-3 text-xs text-slate-400">
-            Counted from positive transactions into wrapper-tagged accounts this tax year —
-            transfers between your own ISAs may be miscounted; tag accounts on the Accounts page.
+            Counted from positive transactions into wrapper-tagged GBP accounts this tax year
+            (rows described as interest are excluded). Transfers between your own ISAs may be
+            miscounted, and pension figures omit employer contributions and tax relief — treat
+            the pension meter as a floor. Tag accounts on the Accounts page.
           </p>
         </Card>
       )}

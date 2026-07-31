@@ -1,21 +1,24 @@
 """UK tax-year allowance metering for wrapped accounts (ISA / LISA / pension).
 
-The UK tax year runs 6 April to 5 April. Annual allowances (2025/26 figures —
-update the constants when HMRC changes them):
+The UK tax year runs 6 April to 5 April. Annual allowances (verify against
+HMRC when a Budget changes them):
 
 - ISA: £20,000 across all ISA types
 - LISA: £4,000 — and LISA contributions ALSO count toward the £20,000 ISA total
-- Pension annual allowance: £60,000 (gross; taper for high earners not modeled)
+- Pension annual allowance: £60,000 gross. Statement credits understate this:
+  relief-at-source arrives net of basic-rate relief, and employer/net-pay
+  contributions never appear on a bank statement — the UI says so.
 
 "Contributions" are positive transactions into wrapper-tagged accounts within
 the tax year — the statement-first approximation. Transfers between your own
-ISAs would be miscounted as new contributions; note says so in the UI.
+ISAs would be miscounted as new contributions, and rows described as interest
+are excluded by the caller; the UI notes both limitations.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from app.models.account import UkWrapper
@@ -35,7 +38,8 @@ def tax_year_bounds(today: date) -> tuple[date, date]:
         start = start_this_calendar_year
     else:
         start = date(today.year - 1, TAX_YEAR_START_MONTH, TAX_YEAR_START_DAY)
-    end = date(start.year + 1, TAX_YEAR_START_MONTH, TAX_YEAR_START_DAY - 1)
+    # Day before next year's start — robust however the start constants change.
+    end = date(start.year + 1, start.month, start.day) - timedelta(days=1)
     return start, end
 
 

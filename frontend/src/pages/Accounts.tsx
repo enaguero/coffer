@@ -33,11 +33,20 @@ export default function Accounts() {
     mutationFn: async (payload: Partial<Account>) => (await api.post("/api/v1/accounts", payload)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
+  const setWrapperMut = useMutation({
+    mutationFn: async (vars: { id: number; uk_wrapper: UkWrapper | null }) =>
+      (await api.patch(`/api/v1/accounts/${vars.id}`, { uk_wrapper: vars.uk_wrapper })).data,
+    onSuccess: () => {
+      for (const key of ["accounts", "allowances", "networth"]) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
   const remove = useMutation({
     mutationFn: async (id: number) => api.delete(`/api/v1/accounts/${id}`),
     onSuccess: () => {
       // Deleting an account cascades into goals (unlink), net worth, and coverage.
-      for (const key of ["accounts", "goals", "networth", "coverage", "transactions"]) {
+      for (const key of ["accounts", "goals", "networth", "coverage", "transactions", "allowances"]) {
         qc.invalidateQueries({ queryKey: [key] });
       }
     },
@@ -171,6 +180,7 @@ export default function Accounts() {
                 <th className="px-5 py-3 text-left font-medium">Name</th>
                 <th className="w-32 px-5 py-3 text-left font-medium">Type</th>
                 <th className="px-5 py-3 text-left font-medium">Institution</th>
+                <th className="w-32 px-5 py-3 text-left font-medium">UK wrapper</th>
                 <th className="w-40 px-5 py-3 text-right font-medium">Opening balance</th>
                 <th className="w-12 px-5 py-3"></th>
               </tr>
@@ -187,8 +197,26 @@ export default function Accounts() {
                     {a.bank_id && (
                       <span className="ml-2 text-xs text-slate-400">preset</span>
                     )}
-                    {a.uk_wrapper && (
-                      <Badge tone="sky">{a.uk_wrapper === "lisa" ? "LISA" : a.uk_wrapper.toUpperCase()}</Badge>
+                  </td>
+                  <td className="px-5 py-3">
+                    {a.currency === "GBP" ? (
+                      <Select
+                        value={a.uk_wrapper ?? ""}
+                        onChange={(e) =>
+                          setWrapperMut.mutate({
+                            id: a.id,
+                            uk_wrapper: (e.target.value || null) as UkWrapper | null,
+                          })
+                        }
+                        className="!w-28 !py-1 text-xs"
+                      >
+                        <option value="">No wrapper</option>
+                        <option value="isa">ISA</option>
+                        <option value="lisa">LISA</option>
+                        <option value="pension">Pension</option>
+                      </Select>
+                    ) : (
+                      <span className="text-xs text-slate-400">—</span>
                     )}
                   </td>
                   <td className="px-5 py-3 text-right nums">

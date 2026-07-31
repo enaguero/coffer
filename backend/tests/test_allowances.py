@@ -105,6 +105,56 @@ def test_allowances_empty_without_tagged_accounts(auth_client) -> None:
     assert body["wrapped_account_count"] == 0
 
 
+def test_interest_rows_do_not_consume_allowance(auth_client) -> None:
+    client, headers, _ = auth_client
+    isa_id = _wrapped_account(client, headers, "Cash ISA", "isa")
+    today = date.today()
+    start, _end = tax_year_bounds(today)
+    inside = min(start + timedelta(days=10), today)
+    csv = (
+        "Date,Description,Amount\n"
+        f"{inside.strftime('%d/%m/%Y')},TRANSFER IN,1000\n"
+        f"{inside.strftime('%d/%m/%Y')},GROSS INTEREST PAID,12.34\n"
+    )
+    r = client.post(
+        "/api/v1/imports/upload",
+        headers=headers,
+        files={"file": ("s.csv", BytesIO(csv.encode()), "text/csv")},
+        data={"account_id": str(isa_id)},
+    )
+    assert r.status_code == 201, r.text
+    body = client.get("/api/v1/insights/allowances", headers=headers).json()
+    meters = {m["wrapper"]: m for m in body["meters"]}
+    assert float(meters["isa"]["used"]) == 1000.0  # interest excluded
+
+
+def test_non_gbp_account_cannot_be_wrapped(auth_client) -> None:
+    client, headers, _ = auth_client
+    r = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"name": "USD ISA", "type": "savings", "currency": "USD", "uk_wrapper": "isa"},
+    )
+    assert r.status_code == 400
+    # And PATCHing a wrapper onto a USD account is rejected too.
+    usd_id = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"name": "USD Savings", "type": "savings", "currency": "USD"},
+    ).json()["id"]
+    r = client.patch(f"/api/v1/accounts/{usd_id}", headers=headers, json={"uk_wrapper": "isa"})
+    assert r.status_code == 400
+    # A GBP account accepts the wrapper via PATCH (the tag-existing-account flow).
+    gbp_id = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"name": "GBP Savings", "type": "savings", "currency": "GBP"},
+    ).json()["id"]
+    r = client.patch(f"/api/v1/accounts/{gbp_id}", headers=headers, json={"uk_wrapper": "isa"})
+    assert r.status_code == 200
+    assert r.json()["uk_wrapper"] == "isa"
+
+
 def test_wrapper_rejected_on_invalid_value(auth_client) -> None:
     client, headers, _ = auth_client
     r = client.post(
