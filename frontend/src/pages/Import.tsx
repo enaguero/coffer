@@ -130,7 +130,10 @@ export default function Import() {
       setCommittedSummary(data);
       setPreview(null);
       setFile(null);
-      qc.invalidateQueries({ queryKey: ["transactions"] });
+      // An import changes balances everywhere derived data is cached.
+      for (const key of ["transactions", "goals", "networth", "surplus", "coverage", "recurring", "forecast"]) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
     },
   });
 

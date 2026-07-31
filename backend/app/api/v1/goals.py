@@ -1,28 +1,28 @@
-from datetime import date, timedelta
-from decimal import ROUND_CEILING, Decimal
+from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import Account
+from app.models.account import Account, AccountType
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.goal import GoalCreate, GoalOut, GoalUpdate
+from app.services.account_loader import load_account_data
+from app.services.analytics.goal_funding import compute_funding
 from app.services.analytics.net_worth import current_balance
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
-DAYS_PER_MONTH = Decimal("30.44")
+# Liability accounts can't fund a goal — their balances run negative and their
+# inflows are repayments, not savings.
+FUNDABLE_TYPES = {AccountType.CHECKING, AccountType.SAVINGS, AccountType.CASH, AccountType.OTHER}
 
 
 def _linked_balances(db, user_id: int, account_ids: set[int]) -> dict[int, Decimal]:
     """Best-known balance per linked account (snapshot-anchored, like net worth)."""
-    if not account_ids:
-        return {}
-    from app.api.v1.insights import _account_data
-
-    return {acc.id: current_balance(acc).balance for acc in _account_data(db, user_id) if acc.id in account_ids}
+    return {acc.id: current_balance(acc).balance for acc in load_account_data(db, user_id, account_ids)}
 
 
 def _funded_this_month(db, user_id: int, account_ids: set[int], today: date) -> dict[int, Decimal]:
@@ -31,7 +31,7 @@ def _funded_this_month(db, user_id: int, account_ids: set[int], today: date) -> 
     # Linked accounts with no contributions this month report £0, not "unknown".
     totals = {account_id: Decimal("0") for account_id in account_ids}
     rows = db.execute(
-        select(Transaction.account_id, func.coalesce(func.sum(Transaction.amount), 0))
+        select(Transaction.account_id, func.sum(Transaction.amount))
         .where(
             Transaction.user_id == user_id,
             Transaction.account_id.in_(account_ids),
@@ -41,39 +41,16 @@ def _funded_this_month(db, user_id: int, account_ids: set[int], today: date) -> 
         )
         .group_by(Transaction.account_id)
     ).all()
-    totals.update({account_id: Decimal(total) for account_id, total in rows})
+    totals.update(dict(rows))
     return totals
 
 
-def _serialize(
-    goal: Goal,
-    balances: dict[int, Decimal],
-    funded: dict[int, Decimal],
-    today: date | None = None,
-) -> GoalOut:
-    today = today or date.today()
+def _serialize(goal: Goal, balances: dict[int, Decimal], funded: dict[int, Decimal], today: date) -> GoalOut:
     target = Decimal(goal.target_amount or 0)
-
-    auto_tracked = goal.account_id is not None and goal.account_id in balances
+    auto_tracked = goal.account_id in balances
     current = balances[goal.account_id] if auto_tracked else Decimal(goal.current_amount or 0)
-    remaining = target - current
 
-    required_monthly: Decimal | None = None
-    if remaining > 0 and goal.target_date is not None and goal.target_date > today:
-        months_left = Decimal((goal.target_date - today).days) / DAYS_PER_MONTH
-        if months_left > 0:
-            required_monthly = (remaining / months_left).quantize(Decimal("0.01"))
-
-    on_track: bool | None = None
-    if remaining <= 0:
-        on_track = True
-    elif required_monthly is not None and goal.monthly_contribution is not None:
-        on_track = goal.monthly_contribution >= required_monthly
-
-    projected_date: date | None = None
-    if remaining > 0 and goal.monthly_contribution and goal.monthly_contribution > 0:
-        months = (remaining / goal.monthly_contribution).quantize(Decimal("1"), rounding=ROUND_CEILING)
-        projected_date = today + timedelta(days=int(months * DAYS_PER_MONTH))
+    funding = compute_funding(target, current, goal.target_date, goal.monthly_contribution, today)
 
     progress = float(current / target) if target > 0 else 0.0
     return GoalOut(
@@ -87,26 +64,40 @@ def _serialize(
         notes=goal.notes,
         progress=min(max(progress, 0.0), 1.0),
         auto_tracked=auto_tracked,
-        required_monthly=required_monthly,
-        on_track=on_track,
-        funded_this_month=funded.get(goal.account_id) if goal.account_id else None,
-        projected_date=projected_date,
+        required_monthly=funding.required_monthly,
+        on_track=funding.on_track,
+        funded_this_month=funded.get(goal.account_id),
+        projected_date=funding.projected_date,
     )
 
 
 def _serialize_all(db, user_id: int, goals: list[Goal]) -> list[GoalOut]:
     linked = {g.account_id for g in goals if g.account_id is not None}
+    today = date.today()
     balances = _linked_balances(db, user_id, linked)
-    funded = _funded_this_month(db, user_id, linked, date.today())
-    return [_serialize(g, balances, funded) for g in goals]
+    funded = _funded_this_month(db, user_id, linked, today)
+    return [_serialize(g, balances, funded, today) for g in goals]
 
 
-def _check_account_owned(db, current, account_id: int | None) -> None:
+def _check_linkable_account(db, current, account_id: int | None, goal_id: int | None = None) -> None:
     if account_id is None:
         return
     account = db.get(Account, account_id)
     if account is None or account.user_id != current.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    if account.type not in FUNDABLE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Goals can only be funded from asset accounts, not credit cards or loans",
+        )
+    # One pot funds one goal — two goals sharing an account would each claim
+    # the full balance and double-count it.
+    clash = db.scalar(select(Goal.id).where(Goal.account_id == account_id, Goal.id != (goal_id or 0)))
+    if clash is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That account already funds another goal",
+        )
 
 
 @router.get("", response_model=list[GoalOut])
@@ -117,7 +108,7 @@ def list_goals(current: CurrentUser, db: DbSession) -> list[GoalOut]:
 
 @router.post("", response_model=GoalOut, status_code=status.HTTP_201_CREATED)
 def create_goal(payload: GoalCreate, current: CurrentUser, db: DbSession) -> GoalOut:
-    _check_account_owned(db, current, payload.account_id)
+    _check_linkable_account(db, current, payload.account_id)
     goal = Goal(user_id=current.id, **payload.model_dump())
     db.add(goal)
     db.commit()
@@ -137,7 +128,13 @@ def update_goal(goal_id: int, payload: GoalUpdate, current: CurrentUser, db: DbS
     goal = _get_owned(db, current, goal_id)
     data = payload.model_dump(exclude_unset=True)
     if "account_id" in data:
-        _check_account_owned(db, current, data["account_id"])
+        _check_linkable_account(db, current, data["account_id"], goal_id=goal.id)
+        # Unlinking: preserve the derived progress as the stored value so the
+        # goal doesn't snap back to a stale (usually zero) current_amount.
+        if data["account_id"] is None and goal.account_id is not None and "current_amount" not in data:
+            balances = _linked_balances(db, current.id, {goal.account_id})
+            if goal.account_id in balances:
+                goal.current_amount = balances[goal.account_id]
     for key, value in data.items():
         setattr(goal, key, value)
     db.commit()

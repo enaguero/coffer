@@ -72,7 +72,7 @@ class PlanResult:
     unpayable: bool = False
 
 
-def _add_months(d: date, months: int) -> date:
+def add_months(d: date, months: int) -> date:
     month_index = d.month - 1 + months
     year = d.year + month_index // 12
     month = month_index % 12 + 1
@@ -143,7 +143,7 @@ def simulate_payoff(
     month = 0
     while any(b > 0 for b in balances.values()) and month < MAX_MONTHS:
         month += 1
-        month_date = _add_months(start, month)
+        month_date = add_months(start, month)
 
         # 1) Accrue interest.
         for d in live:
@@ -212,7 +212,7 @@ def simulate_payoff(
                 break
 
     unpayable = any(b > 0 for b in balances.values())
-    debt_free = None if unpayable else _add_months(start, month)
+    debt_free = None if unpayable else add_months(start, month)
 
     return PlanResult(
         strategy=strategy,
@@ -225,7 +225,7 @@ def simulate_payoff(
             DebtResult(
                 id=d.id,
                 name=d.name,
-                payoff_date=_add_months(start, payoff_month[d.id]) if d.id in payoff_month else None,
+                payoff_date=add_months(start, payoff_month[d.id]) if d.id in payoff_month else None,
                 interest_paid=interest_paid[d.id].quantize(TWO_DP),
             )
             for d in live

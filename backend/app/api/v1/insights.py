@@ -10,8 +10,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import Account, AccountType
-from app.models.balance_snapshot import BalanceSnapshot
+from app.models.account import AccountType
 from app.models.debt import Debt
 from app.models.goal import Goal
 from app.models.transaction import Transaction
@@ -22,9 +21,10 @@ from app.schemas.insights import (
     RecurringItemOut,
     SurplusOut,
 )
+from app.services.account_loader import load_account_data
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
-from app.services.analytics.net_worth import AccountData, compute_net_worth, current_balance
+from app.services.analytics.net_worth import compute_net_worth, current_balance
 from app.services.analytics.recurring import TxnLite, detect_raises, detect_recurring
 from app.services.analytics.surplus import rank_allocations, summarize_month
 
@@ -48,45 +48,6 @@ def _txn_lites(db, user_id: int) -> list[TxnLite]:
         .order_by(Transaction.posted_on)
     ).all()
     return [TxnLite(*row) for row in rows]
-
-
-def _account_data(db, user_id: int) -> list[AccountData]:
-    accounts = list(db.scalars(select(Account).where(Account.user_id == user_id)))
-    txn_rows = db.execute(
-        select(Transaction.account_id, Transaction.posted_on, Transaction.amount)
-        .where(Transaction.user_id == user_id)
-        .order_by(Transaction.posted_on)
-    ).all()
-    snap_rows = db.execute(
-        select(
-            BalanceSnapshot.account_id,
-            BalanceSnapshot.as_of,
-            BalanceSnapshot.balance,
-            BalanceSnapshot.source,
-        )
-        .where(BalanceSnapshot.user_id == user_id)
-        .order_by(BalanceSnapshot.as_of)
-    ).all()
-
-    txns_by_account: dict[int, list[tuple[date, Decimal]]] = {}
-    for account_id, posted_on, amount in txn_rows:
-        txns_by_account.setdefault(account_id, []).append((posted_on, amount))
-    snaps_by_account: dict[int, list[tuple[date, Decimal, str]]] = {}
-    for account_id, as_of, balance, source in snap_rows:
-        snaps_by_account.setdefault(account_id, []).append((as_of, balance, str(source.value)))
-
-    return [
-        AccountData(
-            id=a.id,
-            name=a.name,
-            type=a.type,
-            currency=a.currency,
-            opening_balance=a.opening_balance,
-            txns=txns_by_account.get(a.id, []),
-            snapshots=snaps_by_account.get(a.id, []),
-        )
-        for a in accounts
-    ]
 
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
@@ -121,7 +82,7 @@ def forecast(
     reserve: Decimal = Query(default=Decimal("0"), ge=0),
 ) -> ForecastOut:
     items = detect_recurring(_txn_lites(db, current.id))
-    account_data = _account_data(db, current.id)
+    account_data = load_account_data(db, current.id)
     start = sum(
         (current_balance(a).balance for a in account_data if a.type in LIQUID_TYPES),
         Decimal("0"),
@@ -150,7 +111,7 @@ def networth(
     db: DbSession,
     months: int = Query(default=24, ge=3, le=120),
 ) -> NetWorthOut:
-    account_data = _account_data(db, current.id)
+    account_data = load_account_data(db, current.id)
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
     report = compute_net_worth(
         account_data,
@@ -211,16 +172,22 @@ def surplus(
         else None
     )
 
-    options = (
-        rank_allocations(
-            considered,
-            _debt_inputs(db, current.id),
-            [(g.id, g.name, g.target_amount, g.current_amount, g.target_date) for g in goals],
-            floor,
+    # For goals funded by a linked account, the live derived balance is the
+    # real "current" — the stored current_amount goes stale while auto-tracked.
+    linked_ids = {g.account_id for g in goals if g.account_id is not None}
+    linked_balances = {acc.id: current_balance(acc).balance for acc in load_account_data(db, current.id, linked_ids)}
+    goal_tuples = [
+        (
+            g.id,
+            g.name,
+            g.target_amount,
+            linked_balances.get(g.account_id, g.current_amount) if g.account_id is not None else g.current_amount,
+            g.target_date,
         )
-        if considered > 0
-        else []
-    )
+        for g in goals
+    ]
+
+    options = rank_allocations(considered, _debt_inputs(db, current.id), goal_tuples, floor) if considered > 0 else []
 
     items = detect_recurring(_txn_lites(db, current.id))
     raises = detect_raises(items)

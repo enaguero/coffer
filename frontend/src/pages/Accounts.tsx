@@ -35,7 +35,12 @@ export default function Accounts() {
   });
   const remove = useMutation({
     mutationFn: async (id: number) => api.delete(`/api/v1/accounts/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
+    onSuccess: () => {
+      // Deleting an account cascades into goals (unlink), net worth, and coverage.
+      for (const key of ["accounts", "goals", "networth", "coverage", "transactions"]) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
   });
 
   const [showForm, setShowForm] = useState(false);

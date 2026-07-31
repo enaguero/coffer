@@ -3,14 +3,17 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+# Numeric(14,2) ceiling — reject at validation instead of 500ing on commit.
+MONEY_CAP = Decimal("999999999999.99")
+
 
 class GoalBase(BaseModel):
     name: str = Field(min_length=1, max_length=160)
-    target_amount: Decimal
-    current_amount: Decimal = Decimal("0")
+    target_amount: Decimal = Field(gt=0, le=MONEY_CAP)
+    current_amount: Decimal = Field(default=Decimal("0"), ge=0, le=MONEY_CAP)
     target_date: date | None = None
     account_id: int | None = None
-    monthly_contribution: Decimal | None = Field(default=None, ge=0)
+    monthly_contribution: Decimal | None = Field(default=None, ge=0, le=MONEY_CAP)
     notes: str | None = None
 
 
@@ -20,11 +23,11 @@ class GoalCreate(GoalBase):
 
 class GoalUpdate(BaseModel):
     name: str | None = None
-    target_amount: Decimal | None = None
-    current_amount: Decimal | None = None
+    target_amount: Decimal | None = Field(default=None, gt=0, le=MONEY_CAP)
+    current_amount: Decimal | None = Field(default=None, ge=0, le=MONEY_CAP)
     target_date: date | None = None
     account_id: int | None = None
-    monthly_contribution: Decimal | None = Field(default=None, ge=0)
+    monthly_contribution: Decimal | None = Field(default=None, ge=0, le=MONEY_CAP)
     notes: str | None = None
 
 
