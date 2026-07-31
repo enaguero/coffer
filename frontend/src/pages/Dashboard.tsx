@@ -1,5 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDownRight, ArrowUpRight, CreditCard, PiggyBank, Target } from "lucide-react";
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  Coins,
+  CreditCard,
+  Database,
+  PiggyBank,
+  Target,
+  TrendingUp,
+} from "lucide-react";
+import { Link } from "react-router-dom";
 import {
   Bar,
   BarChart,
@@ -14,10 +24,17 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { BudgetMonthView, DebtSummary, Goal } from "../api/types";
-import { Card, EmptyState, PageHeader, ProgressBar, StatCard } from "../components/ui";
+import type { AccountCoverage, BudgetMonthView, DebtSummary, Goal, Surplus } from "../api/types";
+import { Badge, Card, EmptyState, PageHeader, ProgressBar, StatCard } from "../components/ui";
 import { CHART_COLORS, fmtMoney, MONTH_NAMES, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
+
+const STALE_AFTER_DAYS = 35;
+
+function daysSince(iso: string | null): number | null {
+  if (!iso) return null;
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+}
 
 export default function Dashboard() {
   const now = new Date();
@@ -36,6 +53,19 @@ export default function Dashboard() {
   const goals = useQuery({
     queryKey: ["goals"],
     queryFn: async () => (await api.get<Goal[]>("/api/v1/goals")).data,
+  });
+  const surplus = useQuery({
+    queryKey: ["surplus"],
+    queryFn: async () => (await api.get<Surplus>("/api/v1/insights/surplus")).data,
+  });
+  const coverage = useQuery({
+    queryKey: ["coverage"],
+    queryFn: async () => (await api.get<AccountCoverage[]>("/api/v1/accounts/coverage")).data,
+  });
+
+  const staleAccounts = (coverage.data ?? []).filter((c) => {
+    const days = daysSince(c.last_txn_on);
+    return days === null || days > STALE_AFTER_DAYS;
   });
 
   const netCashflow =
@@ -61,6 +91,27 @@ export default function Dashboard() {
         title={`${MONTH_NAMES[month - 1]} ${year}`}
         subtitle="Your monthly snapshot — income, spending, debt, and goals."
       />
+
+      {(surplus.data?.raises_detected.length ?? 0) > 0 && (
+        <div className="mb-4 space-y-2">
+          {surplus.data?.raises_detected.map((r, i) => (
+            <div
+              key={i}
+              className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+            >
+              <TrendingUp className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                <strong>Pay rise detected:</strong> "{r.description}" went from{" "}
+                {fmtMoney(r.previous_amount, currency)} to {fmtMoney(r.new_amount, currency)} (~
+                {fmtMoney(r.monthly_delta, currency)}/month more). Commit part of it to a debt or
+                goal before it becomes lifestyle — even half is{" "}
+                {fmtMoney(toNum(r.monthly_delta) / 2, currency)}/month. (April tax-code changes can
+                also look like small raises.)
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -176,6 +227,105 @@ export default function Dashboard() {
                 />
               </PieChart>
             </ResponsiveContainer>
+          )}
+        </Card>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-5">
+        <Card className="p-6 lg:col-span-3">
+          <div className="flex items-center gap-2">
+            <Coins className="h-4 w-4 text-slate-400" />
+            <h2 className="text-sm font-semibold text-slate-900">
+              {surplus.data
+                ? `${MONTH_NAMES[surplus.data.month - 1]} surplus — where should it go?`
+                : "Monthly surplus"}
+            </h2>
+          </div>
+          {surplus.data ? (
+            <>
+              <div className="mt-3 flex items-baseline gap-3">
+                <span
+                  className={`text-2xl font-bold tracking-tight nums ${
+                    toNum(surplus.data.surplus) >= 0 ? "text-emerald-600" : "text-rose-600"
+                  }`}
+                >
+                  {fmtMoney(surplus.data.surplus, currency)}
+                </span>
+                <span className="text-xs text-slate-500 nums">
+                  {fmtMoney(surplus.data.income, currency)} in −{" "}
+                  {fmtMoney(surplus.data.outflows, currency)} out
+                </span>
+              </div>
+              {surplus.data.uncategorized_count > 0 && (
+                <div className="mt-1 text-xs text-amber-700">
+                  {surplus.data.uncategorized_count} uncategorized transactions (
+                  {fmtMoney(surplus.data.uncategorized_amount, currency)}) —{" "}
+                  <Link to="/transactions" className="underline">
+                    review them
+                  </Link>{" "}
+                  to keep this number honest.
+                </div>
+              )}
+              {surplus.data.options.length > 0 ? (
+                <ul className="mt-4 space-y-2">
+                  {surplus.data.options.slice(0, 4).map((o, i) => (
+                    <li
+                      key={i}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/60 px-3 py-2 text-sm"
+                    >
+                      <div>
+                        <span className="font-medium text-slate-900">{o.name}</span>
+                        <span className="ml-2 text-xs text-slate-500">{o.note}</span>
+                      </div>
+                      <Badge tone={o.kind === "debt" ? "rose" : o.kind === "goal" ? "sky" : "emerald"}>
+                        {o.kind}
+                      </Badge>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-3 text-sm text-slate-500">
+                  No positive surplus last month — the Forecast page shows where the money went.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-slate-500">Import statements to compute a surplus.</p>
+          )}
+        </Card>
+
+        <Card className="p-6 lg:col-span-2">
+          <div className="flex items-center gap-2">
+            <Database className="h-4 w-4 text-slate-400" />
+            <h2 className="text-sm font-semibold text-slate-900">Data freshness</h2>
+          </div>
+          {coverage.data && coverage.data.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {coverage.data.map((c) => {
+                const days = daysSince(c.last_txn_on);
+                const stale = days === null || days > STALE_AFTER_DAYS;
+                return (
+                  <li key={c.account_id} className="flex items-center justify-between gap-2 text-sm">
+                    <span className="truncate">{c.name}</span>
+                    <Badge tone={stale ? "amber" : "emerald"}>
+                      {c.last_txn_on ? `through ${c.last_txn_on}` : "no data yet"}
+                    </Badge>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-slate-500">No accounts yet.</p>
+          )}
+          {staleAccounts.length > 0 && (
+            <div className="mt-3 border-t border-slate-100 pt-2 text-xs text-amber-700">
+              {staleAccounts.length} account{staleAccounts.length > 1 ? "s" : ""} need a fresh
+              statement —{" "}
+              <Link to="/import" className="underline">
+                import now
+              </Link>
+              . Every number above is only as current as its data.
+            </div>
           )}
         </Card>
       </div>

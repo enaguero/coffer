@@ -19,9 +19,11 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession
 from app.models.account import Account
+from app.models.balance_snapshot import BalanceSnapshot, BalanceSource
 from app.models.category import Category
 from app.models.category_rule import CategoryRule
-from app.models.statement import StatementFormat, StatementImport, StatementImportStatus
+from app.models.import_profile import ImportProfile
+from app.models.statement import StatementImport, StatementImportStatus
 from app.models.transaction import Transaction
 from app.schemas.statement import (
     ConfirmRequest,
@@ -31,12 +33,12 @@ from app.schemas.statement import (
     StatementImportOut,
 )
 from app.services.categorization import compile_rules, match_category
-from app.services.csv_parser import parse_csv
-from app.services.pdf_parser import parse_pdf
+from app.services.import_engine import resolve_and_parse
+from app.services.import_engine.profile import ImportProfileConfig
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
-ALLOWED_EXTENSIONS = {".csv", ".pdf"}
+ALLOWED_EXTENSIONS = {".csv", ".pdf", ".ofx", ".qfx", ".qif"}
 
 
 def _validate_upload(file: UploadFile) -> str:
@@ -44,17 +46,23 @@ def _validate_upload(file: UploadFile) -> str:
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {suffix}. Use .csv or .pdf",
+            detail=f"Unsupported file type: {suffix}. Use .csv, .ofx, .qif, or .pdf",
         )
     return suffix
 
 
-def _parse_content(content: bytes, suffix: str) -> tuple[list, StatementFormat]:
-    if suffix == ".csv":
-        rows, _skipped = parse_csv(content)
-        return rows, StatementFormat.CSV
-    rows, _skipped = parse_pdf(content)
-    return rows, StatementFormat.PDF
+def _load_profile_config(db, account_id: int) -> ImportProfileConfig | None:
+    profile = db.scalar(select(ImportProfile).where(ImportProfile.account_id == account_id))
+    if profile is None:
+        return None
+    try:
+        return ImportProfileConfig.model_validate(profile.config)
+    except ValueError:
+        # A profile saved by an older build may no longer validate; ignore it
+        # rather than block imports.
+        return None
+
+
 
 
 def _persist_file(user_id: int, content: bytes, suffix: str) -> tuple[Path, str]:
@@ -85,6 +93,30 @@ def _get_user_account(db, current, account_id: int) -> Account:
     return account
 
 
+def _record_statement_balance(db, user_id: int, account_id: int, as_of, balance) -> None:
+    """Upsert the statement-attested balance for (account, day)."""
+    if as_of is None or balance is None:
+        return
+    snap = db.scalar(
+        select(BalanceSnapshot).where(
+            BalanceSnapshot.account_id == account_id, BalanceSnapshot.as_of == as_of
+        )
+    )
+    if snap is None:
+        db.add(
+            BalanceSnapshot(
+                user_id=user_id,
+                account_id=account_id,
+                as_of=as_of,
+                balance=balance,
+                source=BalanceSource.STATEMENT,
+            )
+        )
+    else:
+        snap.balance = balance
+        snap.source = BalanceSource.STATEMENT
+
+
 @router.get("", response_model=list[StatementImportOut])
 def list_imports(current: CurrentUser, db: DbSession) -> list[StatementImport]:
     return list(
@@ -110,7 +142,8 @@ async def upload_statement(
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
 
-    rows, fmt = _parse_content(content, suffix)
+    outcome = resolve_and_parse(content, suffix, account, _load_profile_config(db, account.id))
+    rows = outcome.rows
     stored_path, stored_name = _persist_file(current.id, content, suffix)
 
     record = StatementImport(
@@ -118,7 +151,7 @@ async def upload_statement(
         account_id=account.id,
         filename=file.filename or stored_name,
         stored_path=str(stored_path),
-        format=fmt,
+        format=outcome.format,
         status=StatementImportStatus.COMMITTED,
         rows_parsed=len(rows),
         rows_imported=0,
@@ -162,6 +195,9 @@ async def upload_statement(
         imported += 1
 
     record.rows_imported = imported
+    _record_statement_balance(
+        db, current.id, account.id, outcome.closing_balance_date, outcome.closing_balance
+    )
     db.commit()
     db.refresh(record)
     return ImportResponse(
@@ -187,7 +223,9 @@ async def preview_statement(
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
 
-    rows, fmt = _parse_content(content, suffix)
+    profile_config = _load_profile_config(db, account.id)
+    outcome = resolve_and_parse(content, suffix, account, profile_config)
+    rows = outcome.rows
     stored_path, stored_name = _persist_file(current.id, content, suffix)
 
     existing_ids = _existing_external_ids(db, current.id, account.id)
@@ -227,11 +265,13 @@ async def preview_statement(
         account_id=account.id,
         filename=file.filename or stored_name,
         stored_path=str(stored_path),
-        format=fmt,
+        format=outcome.format,
         status=StatementImportStatus.PREVIEW,
         rows_parsed=len(rows),
         rows_imported=0,
         preview_rows=preview_rows,
+        closing_balance=outcome.closing_balance,
+        closing_balance_date=outcome.closing_balance_date,
     )
     db.add(record)
     db.commit()
@@ -255,6 +295,14 @@ async def preview_statement(
         ],
         duplicate_count=dup_count,
         auto_categorized_count=auto_count,
+        source=outcome.source,
+        warnings=outcome.warnings,
+        inferred_config=(
+            outcome.inferred_config.model_dump(mode="json")
+            if outcome.inferred_config is not None
+            else None
+        ),
+        has_profile=profile_config is not None,
     )
 
 
@@ -337,6 +385,9 @@ def confirm_preview(
     record.status = StatementImportStatus.COMMITTED
     record.rows_imported = imported
     record.preview_rows = None  # free the JSON once committed
+    _record_statement_balance(
+        db, current.id, record.account_id, record.closing_balance_date, record.closing_balance
+    )
     db.commit()
     db.refresh(record)
     return ImportResponse(

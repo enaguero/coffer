@@ -1,12 +1,13 @@
 import {
   ArrowUpDown,
-  Banknote,
   CreditCard,
   LayoutDashboard,
   LineChart,
   ListTree,
   LogOut,
   PiggyBank,
+  Radar,
+  Scale,
   Target,
   Upload,
   Wallet,
@@ -24,7 +25,8 @@ const navItems = [
   { to: "/categories", label: "Categories", icon: ListTree },
   { to: "/debts", label: "Debts", icon: CreditCard },
   { to: "/goals", label: "Goals", icon: Target },
-  { to: "/banks", label: "Banks", icon: Banknote },
+  { to: "/forecast", label: "Forecast", icon: Radar },
+  { to: "/networth", label: "Net worth", icon: Scale },
   { to: "/import", label: "Import", icon: Upload },
 ];
 

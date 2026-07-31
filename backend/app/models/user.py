@@ -21,4 +21,3 @@ class User(Base, TimestampMixin):
     cashflow_lines: Mapped[list["CashflowLine"]] = relationship(back_populates="user", cascade="all, delete-orphan")  # noqa: F821
     goals: Mapped[list["Goal"]] = relationship(back_populates="user", cascade="all, delete-orphan")  # noqa: F821
     statement_imports: Mapped[list["StatementImport"]] = relationship(back_populates="user", cascade="all, delete-orphan")  # noqa: F821
-    bank_connections: Mapped[list["BankConnection"]] = relationship(back_populates="user", cascade="all, delete-orphan")  # noqa: F821

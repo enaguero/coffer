@@ -1,7 +1,9 @@
+from datetime import date
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, Integer, String
+from sqlalchemy import Date, Enum, ForeignKey, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,6 +13,8 @@ from app.models.base import Base, TimestampMixin
 class StatementFormat(StrEnum):
     CSV = "csv"
     PDF = "pdf"
+    OFX = "ofx"
+    QIF = "qif"
 
 
 class StatementImportStatus(StrEnum):
@@ -45,6 +49,10 @@ class StatementImport(Base, TimestampMixin):
     # Set on previews, NULL after commit/discard. List of {id, external_id,
     # posted_on, description, amount, suggested_category_id, is_duplicate}.
     preview_rows: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # Attested closing balance parsed from the statement, held here so the
+    # preview → confirm flow can record a BalanceSnapshot at commit time.
+    closing_balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    closing_balance_date: Mapped[date | None] = mapped_column(Date)
     notes: Mapped[str | None] = mapped_column(String(1000))
 
     user: Mapped["User"] = relationship(back_populates="statement_imports")  # noqa: F821

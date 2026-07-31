@@ -1,10 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Banknote, CheckCircle2, FileUp, Upload, X } from "lucide-react";
+import { CheckCircle2, FileUp, Upload, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Account, Category } from "../api/types";
+import type { Account, Category, ImportProfileConfig, UkBank } from "../api/types";
 import { Badge, Button, Card, Label, PageHeader, Select } from "../components/ui";
 import { fmtMoneySigned, toNum } from "../lib/format";
 
@@ -25,11 +24,29 @@ interface PreviewResponse {
   rows: PreviewRow[];
   duplicate_count: number;
   auto_categorized_count: number;
+  source: string;
+  warnings: string[];
+  inferred_config: ImportProfileConfig | null;
+  has_profile: boolean;
 }
 
 interface RowChoice {
   skip: boolean;
   category_id: number | null;
+}
+
+function sourceLabel(source: string, banks: UkBank[] | undefined): string {
+  if (source === "ofx") return "Parsed from OFX (exact bank transaction IDs)";
+  if (source === "qif") return "Parsed from QIF";
+  if (source === "profile") return "Parsed with this account's saved profile";
+  if (source === "heuristic") return "Parsed with automatic detection";
+  if (source.startsWith("preset:")) {
+    const bankId = source.slice("preset:".length);
+    const bank = banks?.find((b) => b.id === bankId);
+    return `Parsed with the ${bank?.name ?? bankId} preset`;
+  }
+  if (source.startsWith("adapter:")) return "Parsed with the bank-specific importer";
+  return source;
 }
 
 export default function Import() {
@@ -42,11 +59,16 @@ export default function Import() {
     queryKey: ["categories"],
     queryFn: async () => (await api.get<Category[]>("/api/v1/categories")).data,
   });
+  const banks = useQuery({
+    queryKey: ["banks"],
+    queryFn: async () => (await api.get<UkBank[]>("/api/v1/banks")).data,
+  });
 
   const [accountId, setAccountId] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [choices, setChoices] = useState<Record<number, RowChoice>>({});
+  const [saveProfile, setSaveProfile] = useState(false);
   const [committedSummary, setCommittedSummary] = useState<{
     rows_imported: number;
     skipped_duplicates: number;
@@ -74,6 +96,8 @@ export default function Import() {
         };
       }
       setChoices(next);
+      // Default to remembering the detected layout when there's nothing saved yet.
+      setSaveProfile(Boolean(data.inferred_config) && !data.has_profile);
       setCommittedSummary(null);
     },
   });
@@ -90,7 +114,19 @@ export default function Import() {
       }>(`/api/v1/imports/${vars.import_id}/confirm`, { rows: vars.rows });
       return data;
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
+      if (preview && saveProfile && preview.inferred_config) {
+        // Best-effort: a failed profile save shouldn't obscure a successful import.
+        try {
+          await api.put(`/api/v1/accounts/${preview.account_id}/import-profile`, {
+            name: `From ${preview.filename}`,
+            source: "inferred",
+            config: preview.inferred_config,
+          });
+        } catch {
+          // ignore
+        }
+      }
       setCommittedSummary(data);
       setPreview(null);
       setFile(null);
@@ -136,23 +172,8 @@ export default function Import() {
     <>
       <PageHeader
         title="Import statement"
-        subtitle="Upload a CSV or PDF — review the parsed rows, then commit."
+        subtitle="Upload a statement downloaded from your bank — review the parsed rows, then commit."
       />
-
-      {!preview && (
-        <Card className="mb-6 flex items-center gap-3 border-brand-200 bg-brand-50/40 p-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-100 text-brand-700">
-            <Banknote className="h-4 w-4" />
-          </div>
-          <div className="flex-1 text-sm text-slate-700">
-            EU/UK bank?{" "}
-            <Link to="/banks" className="font-medium text-brand-700 hover:underline">
-              Connect via Open Banking
-            </Link>{" "}
-            to pull transactions automatically — no more file uploads.
-          </div>
-        </Card>
-      )}
 
       {!preview && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -169,10 +190,10 @@ export default function Import() {
               </label>
 
               <label className="block">
-                <Label>File (CSV or PDF)</Label>
+                <Label>File (CSV, OFX, QIF, or PDF)</Label>
                 <div className="mt-1 flex items-center justify-center rounded-lg border-2 border-dashed border-slate-300 bg-slate-50 px-6 py-8 hover:border-brand-500 hover:bg-brand-50/30 transition cursor-pointer">
                   <input
-                    type="file" required accept=".csv,.pdf"
+                    type="file" required accept=".csv,.ofx,.qfx,.qif,.pdf"
                     onChange={(e) => setFile(e.target.files?.[0] ?? null)}
                     className="sr-only"
                     id="statement-file"
@@ -182,7 +203,7 @@ export default function Import() {
                     <div className="mt-2 text-sm font-medium text-slate-900">
                       {file ? file.name : "Click to choose a file"}
                     </div>
-                    <div className="mt-0.5 text-xs text-slate-500">CSV or PDF</div>
+                    <div className="mt-0.5 text-xs text-slate-500">CSV, OFX, QIF, or PDF</div>
                   </label>
                 </div>
               </label>
@@ -217,10 +238,11 @@ export default function Import() {
           <Card className="p-6">
             <h3 className="text-sm font-semibold text-slate-900">Notes</h3>
             <ul className="mt-3 space-y-2 text-sm text-slate-600">
-              <li>Bank CSVs are sniffed automatically — date, description, amount.</li>
-              <li>PDFs use table extraction with a line-parsing fallback.</li>
-              <li>Negative amounts are outflows, positive are inflows.</li>
-              <li>Re-uploads dedupe by date + description + amount within the same account.</li>
+              <li>Accounts linked to a UK bank parse with that bank's built-in preset.</li>
+              <li>Prefer OFX/QIF downloads when your bank offers them — they carry exact transaction IDs.</li>
+              <li>Other CSVs are sniffed automatically, and the detected layout can be saved as the account's profile.</li>
+              <li>Negative amounts are outflows, positive are inflows (credit-card presets flip signs for you).</li>
+              <li>Re-uploads dedupe within the same account, so overlapping statements are safe.</li>
               <li>Auto-categorization runs from rules defined on the Categories page.</li>
             </ul>
           </Card>
@@ -256,6 +278,29 @@ export default function Import() {
               </Button>
             </div>
           </div>
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-200 bg-white px-5 py-2 text-xs text-slate-500">
+            <span>{sourceLabel(preview.source, banks.data)}</span>
+            {preview.inferred_config && (
+              <label className="flex cursor-pointer items-center gap-1.5 text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={saveProfile}
+                  onChange={(e) => setSaveProfile(e.target.checked)}
+                />
+                {preview.has_profile
+                  ? "Update this account's import profile with this layout"
+                  : "Remember this layout as the account's import profile"}
+              </label>
+            )}
+          </div>
+          {preview.warnings.length > 0 && (
+            <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">
+              {preview.warnings.map((w, i) => (
+                <div key={i}>{w}</div>
+              ))}
+            </div>
+          )}
 
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">

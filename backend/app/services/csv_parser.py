@@ -21,6 +21,7 @@ DESC_COLUMN_HINTS = ("description", "details", "narration", "memo", "payee", "co
 AMOUNT_COLUMN_HINTS = ("amount", "value", "monto", "importe")
 DEBIT_HINTS = ("debit", "withdrawal", "cargo", "egreso", "out")
 CREDIT_HINTS = ("credit", "deposit", "abono", "ingreso", "in")
+BALANCE_HINTS = ("balance", "saldo")
 
 
 @dataclass
@@ -29,6 +30,25 @@ class ParsedRow:
     description: str
     amount: Decimal
     external_id: str | None = None
+    # Running/closing account balance after this row, when the statement
+    # carries one. Feeds BalanceSnapshot attestations at import.
+    balance: Decimal | None = None
+
+
+@dataclass
+class DetectedLayout:
+    """What the sniffer concluded about a CSV — the raw material for building a
+    saveable import profile (services/import_engine/profile.py)."""
+
+    delimiter: str
+    header_row: int  # 0-based index of the header line
+    header: list[str]
+    date_column: int
+    description_column: int
+    amount_column: int | None
+    debit_column: int | None
+    credit_column: int | None
+    balance_column: int | None = None
 
 
 def _find_column(header: list[str], hints: Iterable[str]) -> int | None:
@@ -43,7 +63,7 @@ def _find_column(header: list[str], hints: Iterable[str]) -> int | None:
 def _parse_decimal(value: str) -> Decimal | None:
     if value is None:
         return None
-    cleaned = value.strip().replace("$", "").replace(" ", "")
+    cleaned = value.strip().replace("$", "").replace("£", "").replace("€", "").replace(" ", "")
     if not cleaned:
         return None
     # Handle parentheses for negatives, e.g. (123.45)
@@ -78,6 +98,14 @@ def _parse_date(value: str) -> date | None:
 
 def parse_csv(content: bytes) -> tuple[list[ParsedRow], int]:
     """Return (rows, skipped_rows)."""
+    rows, skipped, _layout = parse_csv_detailed(content)
+    return rows, skipped
+
+
+def parse_csv_detailed(content: bytes) -> tuple[list[ParsedRow], int, DetectedLayout | None]:
+    """Like parse_csv, but also reports the detected layout (None when the
+    sniffer couldn't find usable columns) so callers can offer to save it as an
+    import profile."""
     text = content.decode("utf-8-sig", errors="replace")
     try:
         sample = text[:4096]
@@ -88,7 +116,7 @@ def parse_csv(content: bytes) -> tuple[list[ParsedRow], int]:
     reader = csv.reader(StringIO(text), dialect=dialect)
     rows = list(reader)
     if not rows:
-        return [], 0
+        return [], 0, None
 
     # Skip leading metadata lines until we find a plausible header (>= 3 cells).
     header_idx = 0
@@ -103,9 +131,26 @@ def parse_csv(content: bytes) -> tuple[list[ParsedRow], int]:
     amount_col = _find_column(header, AMOUNT_COLUMN_HINTS)
     debit_col = _find_column(header, DEBIT_HINTS)
     credit_col = _find_column(header, CREDIT_HINTS)
+    balance_col = _find_column(header, BALANCE_HINTS)
+    # "Balance" can double-match loose amount hints on some layouts; never let
+    # the same column serve as both.
+    if balance_col is not None and balance_col == amount_col:
+        balance_col = None
 
     if date_col is None or desc_col is None or (amount_col is None and debit_col is None and credit_col is None):
-        return [], len(rows) - header_idx - 1
+        return [], len(rows) - header_idx - 1, None
+
+    layout = DetectedLayout(
+        delimiter=dialect.delimiter,
+        header_row=header_idx,
+        header=[h.strip() for h in header],
+        date_column=date_col,
+        description_column=desc_col,
+        amount_column=amount_col,
+        debit_column=debit_col,
+        credit_column=credit_col,
+        balance_column=balance_col,
+    )
 
     parsed: list[ParsedRow] = []
     skipped = 0
@@ -136,12 +181,17 @@ def parse_csv(content: bytes) -> tuple[list[ParsedRow], int]:
             skipped += 1
             continue
 
+        balance: Decimal | None = None
+        if balance_col is not None and balance_col < len(raw):
+            balance = _parse_decimal(raw[balance_col])
+
         parsed.append(
             ParsedRow(
                 posted_on=posted,
                 description=description[:500],
                 amount=amount,
                 external_id=f"{posted.isoformat()}|{description[:80]}|{amount}",
+                balance=balance,
             )
         )
-    return parsed, skipped
+    return parsed, skipped, layout

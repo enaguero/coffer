@@ -3,16 +3,16 @@ import { Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Accounts from "./pages/Accounts";
-import BankCallback from "./pages/BankCallback";
-import BankConnections from "./pages/BankConnections";
 import Budget from "./pages/Budget";
 import Cashflow from "./pages/Cashflow";
 import Categories from "./pages/Categories";
 import Dashboard from "./pages/Dashboard";
 import Debts from "./pages/Debts";
+import Forecast from "./pages/Forecast";
 import Goals from "./pages/Goals";
 import Import from "./pages/Import";
 import Login from "./pages/Login";
+import NetWorth from "./pages/NetWorth";
 import Signup from "./pages/Signup";
 import Transactions from "./pages/Transactions";
 
@@ -31,8 +31,8 @@ export default function App() {
           <Route path="categories" element={<Categories />} />
           <Route path="debts" element={<Debts />} />
           <Route path="goals" element={<Goals />} />
-          <Route path="banks" element={<BankConnections />} />
-          <Route path="banks/callback" element={<BankCallback />} />
+          <Route path="forecast" element={<Forecast />} />
+          <Route path="networth" element={<NetWorth />} />
           <Route path="import" element={<Import />} />
         </Route>
       </Route>

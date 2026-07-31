@@ -1,14 +1,34 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Filter, Receipt } from "lucide-react";
+import { Filter, Receipt, Wand2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import type { Account, Category, Transaction } from "../api/types";
-import { Badge, Button, Card, EmptyState, PageHeader, Select } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Input, PageHeader, Select } from "../components/ui";
 import { fmtMoneySigned, toNum } from "../lib/format";
 import { useAccountCurrencyMap } from "../lib/useCurrency";
 
 type Filter = "all" | "uncategorized";
+
+// Mirror of the backend's merchant normalization: the stable token of a
+// description, suitable as a substring rule pattern.
+function suggestPattern(description: string): string {
+  return description
+    .toUpperCase()
+    .replace(/[0-9]+|[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 3)
+    .join(" ")
+    .slice(0, 32);
+}
+
+interface RuleHint {
+  pattern: string;
+  categoryId: number;
+  categoryName: string;
+}
 
 export default function Transactions() {
   const qc = useQueryClient();
@@ -36,10 +56,38 @@ export default function Transactions() {
     },
   });
 
+  const [ruleHint, setRuleHint] = useState<RuleHint | null>(null);
+
   const updateCategory = useMutation({
-    mutationFn: async (vars: { id: number; category_id: number | null }) =>
-      api.patch(`/api/v1/transactions/${vars.id}`, { category_id: vars.category_id }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["transactions"] }),
+    mutationFn: async (vars: {
+      id: number;
+      category_id: number | null;
+      description: string;
+      was_uncategorized: boolean;
+    }) => api.patch(`/api/v1/transactions/${vars.id}`, { category_id: vars.category_id }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["transactions"] });
+      // Offer to make the correction permanent as an auto-categorization rule.
+      if (vars.category_id !== null) {
+        const cat = categories.data?.find((c) => c.id === vars.category_id);
+        const pattern = suggestPattern(vars.description);
+        if (cat && pattern) {
+          setRuleHint({ pattern, categoryId: cat.id, categoryName: cat.name });
+        }
+      }
+    },
+  });
+
+  const saveRule = useMutation({
+    mutationFn: async (vars: { pattern: string; category_id: number }) => {
+      await api.post("/api/v1/category-rules", vars);
+      // Retroactively categorize everything the new rule matches.
+      return (await api.post<{ transactions_updated: number }>("/api/v1/category-rules/apply")).data;
+    },
+    onSuccess: () => {
+      setRuleHint(null);
+      qc.invalidateQueries({ queryKey: ["transactions"] });
+    },
   });
 
   const bulkAssign = useMutation({
@@ -121,6 +169,40 @@ export default function Transactions() {
           </div>
         }
       />
+
+      {ruleHint && (
+        <Card className="mb-4 flex flex-wrap items-center gap-3 border-brand-200 bg-brand-50/40 p-3">
+          <Wand2 className="h-4 w-4 shrink-0 text-brand-700" />
+          <span className="text-sm text-slate-700">
+            Always file descriptions containing
+          </span>
+          <Input
+            value={ruleHint.pattern}
+            onChange={(e) => setRuleHint({ ...ruleHint, pattern: e.target.value })}
+            className="!w-56 !py-1 font-mono text-xs"
+          />
+          <span className="text-sm text-slate-700">
+            as <strong>{ruleHint.categoryName}</strong>?
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              className="!py-1.5"
+              disabled={!ruleHint.pattern.trim() || saveRule.isPending}
+              onClick={() =>
+                saveRule.mutate({
+                  pattern: ruleHint.pattern.trim(),
+                  category_id: ruleHint.categoryId,
+                })
+              }
+            >
+              {saveRule.isPending ? "Saving…" : "Save rule + apply"}
+            </Button>
+            <Button variant="ghost" className="!py-1.5" onClick={() => setRuleHint(null)}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {selectedIds.size > 0 && (
         <Card className="mb-4 flex items-center justify-between gap-3 p-3">
@@ -204,6 +286,8 @@ export default function Transactions() {
                         updateCategory.mutate({
                           id: t.id,
                           category_id: e.target.value ? Number(e.target.value) : null,
+                          description: t.description,
+                          was_uncategorized: t.category_id === null,
                         })
                       }
                       className="!py-1"

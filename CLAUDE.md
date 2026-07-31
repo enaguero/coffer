@@ -51,24 +51,29 @@ Test database (`coffer_test`) is created at session start by the conftest, schem
 FastAPI + SQLAlchemy 2 (declarative `Mapped[...]`) + Alembic, Python 3.12 managed by `uv`.
 
 - `main.py` mounts CORS, slowapi middleware, and the `api_router`. Health at `/health`.
-- `api/v1/router.py` aggregates per-resource routers under `/api/v1`: `accounts`, `auth`, `budgets`, `categories`, `category_rules`, `debts`, `goals`, `imports`, `transactions`.
+- `api/v1/router.py` aggregates per-resource routers under `/api/v1`: `accounts`, `auth`, `banks`, `budgets`, `cashflow`, `categories`, `category_rules`, `debts`, `goals`, `imports`, `insights`, `transactions`.
 - `core/deps.py` exports `CurrentUser` (JWT-authenticated `User`) and `DbSession`. **Auth is dual-mode**: `get_current_user` reads the HttpOnly session cookie first (`COOKIE_NAME` in `core/cookies.py`), then falls back to the OAuth2 Bearer header — browsers use the cookie, `/docs` and API clients use Bearer. Every per-user query filters by `current.id`.
 - `core/config.py` — pydantic settings. `assert_production_safe()` runs at import and refuses to boot if `JWT_SECRET` is unset, a known placeholder, or under 32 chars, unless `COFFER_ENV` is `dev` or `test`.
 - `core/security.py` — bcrypt password hashing + PyJWT encode/decode (`sub = user_id`).
 - `core/rate_limit.py` — slowapi `Limiter` with in-process storage. Disabled when `COFFER_ENV in {test}`. `/auth/login` is 10/min and `/auth/signup` is 5/hour per IP.
 - `models/` — SQLAlchemy declarative models, all inheriting `Base` (+ `TimestampMixin`). All money columns are `Mapped[Decimal]` over `Numeric(14,2)` — do not introduce `Mapped[float]`.
 - `schemas/` — Pydantic v2 request/response models. Money fields are `Decimal`; JSON output serializes through pydantic's Decimal handling.
-- `services/csv_parser.py` / `services/pdf_parser.py` — pure parsing, return normalized rows + a `external_id` synthesized as `date|desc|amount` (used for per-account dedup on import).
+- `services/csv_parser.py` / `services/pdf_parser.py` — heuristic parsing (the fallback layer), return normalized rows + a `external_id` synthesized as `date|desc|amount` (used for per-account dedup on import). `parse_csv_detailed` also reports the detected column layout so it can be saved as an import profile.
+- `services/import_engine/` — the statement import engine. `resolver.resolve_and_parse` picks the parse strategy for an upload: OFX/QIF by extension (`formats/`), then the account's saved `ImportProfile`, then the UK bank catalog preset/adapter for the account's `(bank_id, type)` (`catalog.py`, `adapters/`), then the heuristic sniffer. Presets are declarative `ImportProfileConfig`s (data, not classes) — a mismatching preset/profile degrades to the next layer with a user-visible warning, never a failed upload. Code adapters (registry in `adapters/base.py`) exist only where parsing needs logic (e.g. Revolut's state filtering). **Adding a UK bank = adding a data entry to `catalog.py`.**
 - `services/categorization.py` — compile + match user-defined `CategoryRule`s against transaction descriptions. Called both during import and from the manual catch-up endpoint.
+- `services/analytics/` — pure financial computation, no DB/FastAPI (unit-testable with plain values). `debt_plan.py`: promo-APR-aware avalanche/snowball amortization with snowflake extras (POST `/debts/plan` compares vs a minimums-only baseline; an `unpayable` truncated baseline reports no savings comparison). `recurring.py`: recurring-transaction detection (the enabling primitive) + salary-raise detection. `forecast.py`: day-by-day balance projection from recurring items with reserve-threshold warnings; debt due-days are calendar annotations only (projecting them would double-count detected payments). `net_worth.py`: balance-at-date anchored on the latest BalanceSnapshot then applying later transactions; drift = attested minus derived (missing-data signal). `surplus.py`: monthly cash surplus + marginal-pound allocation ranking (debt APR = guaranteed return, goal months-earlier, runway gained). Served by `api/v1/insights.py` and `/accounts/coverage` (per-account data-freshness).
+- **Balance attestations**: statement parsers capture the bank's own running/closing balance (CSV `Balance` columns via presets/profiles/heuristic, OFX `<LEDGERBAL>`) into `BalanceSnapshot` at import — one per (account, day), manual valuations (pension/property on `other`-type accounts) share the table via `POST /accounts/{id}/snapshots`.
 - `seed.py` — `python -m app.seed` (`--reset` wipes first). The demo user's debt minimums sum to exactly 40% of $5,000 salary; preserve that invariant.
 
 ### Statement import flow (`api/v1/imports.py`)
-Two flows live side-by-side:
+Accepted uploads: `.csv`, `.ofx`/`.qfx`, `.qif`, `.pdf`. Two flows live side-by-side:
 
 - **Quick (`POST /imports/upload`)** — parse + dedup + auto-categorize + commit in one request. Used by the legacy/simple path.
-- **Preview-then-commit** — `POST /imports/preview` parses, stores rows as JSONB on the `StatementImport` row with `status="preview"`, returns the rows annotated with `suggested_category_id` and `is_duplicate`. The user reviews in the UI, then `POST /imports/{id}/confirm` commits the selected subset (with optional per-row category overrides). `DELETE /imports/{id}` discards a preview.
+- **Preview-then-commit** — `POST /imports/preview` parses, stores rows as JSONB on the `StatementImport` row with `status="preview"`, returns the rows annotated with `suggested_category_id` and `is_duplicate`, plus how the file was parsed (`source`, `warnings`) and — when the heuristic sniffer ran — an `inferred_config` the client can save as the account's import profile. The user reviews in the UI, then `POST /imports/{id}/confirm` commits the selected subset (with optional per-row category overrides). `DELETE /imports/{id}` discards a preview.
 
-In both flows, the file is parsed **before** being written to disk so a parse failure can't leave an orphan upload, and inserted transactions are deduped by `external_id` per-account.
+In both flows, the file is parsed **before** being written to disk so a parse failure can't leave an orphan upload, and inserted transactions are deduped by `external_id` per-account (bank-native ids — OFX `FITID`, Monzo `Transaction ID` — when available, the synthesized key otherwise).
+
+Import profiles are one-per-account (`models/import_profile.py`, JSONB config) managed via `GET/PUT/DELETE /accounts/{id}/import-profile`. The UK bank list for the account picker is served by `GET /api/v1/banks` from `services/import_engine/catalog.py`; `accounts.bank_id` stores the chosen catalog slug and drives preset selection on import.
 
 ### Frontend (`frontend/src/`)
 Vite + React 18 + TypeScript + Tailwind + React Router 6 + React Query + axios + recharts + lucide-react.

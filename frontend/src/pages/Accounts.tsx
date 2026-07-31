@@ -3,11 +3,11 @@ import { Plus, Trash2, Wallet } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
 import { api } from "../api/client";
-import type { Account, AccountType } from "../api/types";
+import type { Account, AccountType, UkBank } from "../api/types";
 import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, Select } from "../components/ui";
 import { fmtMoney } from "../lib/format";
 
-const TYPES: AccountType[] = ["checking", "savings", "credit_card", "loan", "overdraft", "cash", "other"];
+const ALL_TYPES: AccountType[] = ["checking", "savings", "credit_card", "loan", "overdraft", "cash", "other"];
 
 const TYPE_TONE: Record<AccountType, "emerald" | "rose" | "sky" | "amber" | "slate" | "brand"> = {
   checking: "sky",
@@ -25,6 +25,10 @@ export default function Accounts() {
     queryKey: ["accounts"],
     queryFn: async () => (await api.get<Account[]>("/api/v1/accounts")).data,
   });
+  const banks = useQuery({
+    queryKey: ["banks"],
+    queryFn: async () => (await api.get<UkBank[]>("/api/v1/banks")).data,
+  });
   const create = useMutation({
     mutationFn: async (payload: Partial<Account>) => (await api.post("/api/v1/accounts", payload)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
@@ -36,10 +40,24 @@ export default function Accounts() {
 
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
+  const [bankId, setBankId] = useState("");
   const [type, setType] = useState<AccountType>("checking");
   const [institution, setInstitution] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [opening, setOpening] = useState("0");
+
+  const selectedBank = banks.data?.find((b) => b.id === bankId) ?? null;
+  const typeOptions = selectedBank ? selectedBank.account_types : ALL_TYPES;
+
+  function onPickBank(id: string) {
+    setBankId(id);
+    const bank = banks.data?.find((b) => b.id === id);
+    if (bank) {
+      setInstitution(bank.name);
+      setCurrency("GBP");
+      if (!bank.account_types.includes(type)) setType(bank.account_types[0]);
+    }
+  }
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -47,12 +65,13 @@ export default function Accounts() {
       {
         name, type,
         institution: institution || null,
+        bank_id: bankId || null,
         currency,
         opening_balance: opening as unknown as string,
       },
       {
         onSuccess: () => {
-          setName(""); setInstitution(""); setOpening("0");
+          setName(""); setBankId(""); setInstitution(""); setOpening("0");
           setShowForm(false);
         },
       },
@@ -75,21 +94,32 @@ export default function Accounts() {
       {showForm && (
         <Card className="mb-6 p-6">
           <h2 className="mb-4 text-sm font-semibold text-slate-900">New account</h2>
-          <form onSubmit={onSubmit} className="grid grid-cols-1 gap-3 md:grid-cols-5">
+          <form onSubmit={onSubmit} className="grid grid-cols-1 gap-3 md:grid-cols-6">
             <label>
               <Label>Name</Label>
               <Input required value={name} onChange={(e) => setName(e.target.value)} />
             </label>
             <label>
-              <Label>Type</Label>
-              <Select value={type} onChange={(e) => setType(e.target.value as AccountType)}>
-                {TYPES.map((t) => <option key={t} value={t}>{t.replace("_", " ")}</option>)}
+              <Label>Bank</Label>
+              <Select value={bankId} onChange={(e) => onPickBank(e.target.value)}>
+                <option value="">Not listed / manual</option>
+                {banks.data?.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
               </Select>
             </label>
             <label>
-              <Label>Institution</Label>
-              <Input value={institution} onChange={(e) => setInstitution(e.target.value)} />
+              <Label>Type</Label>
+              <Select value={type} onChange={(e) => setType(e.target.value as AccountType)}>
+                {typeOptions.map((t) => <option key={t} value={t}>{t.replace("_", " ")}</option>)}
+              </Select>
             </label>
+            {!selectedBank && (
+              <label>
+                <Label>Institution</Label>
+                <Input value={institution} onChange={(e) => setInstitution(e.target.value)} />
+              </label>
+            )}
             <label>
               <Label>Currency</Label>
               <Input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} maxLength={3} />
@@ -98,8 +128,14 @@ export default function Accounts() {
               <Label>Opening balance</Label>
               <Input value={opening} onChange={(e) => setOpening(e.target.value)} />
             </label>
-            <div className="md:col-span-5">
+            <div className="md:col-span-6">
               <Button type="submit">Save account</Button>
+              {selectedBank && (
+                <span className="ml-3 text-xs text-slate-500">
+                  Statement imports for {selectedBank.name} will use its built-in preset
+                  {selectedBank.notes ? ` — ${selectedBank.notes}` : ""}
+                </span>
+              )}
             </div>
           </form>
         </Card>
@@ -130,7 +166,12 @@ export default function Accounts() {
                   <td className="px-5 py-3">
                     <Badge tone={TYPE_TONE[a.type]}>{a.type.replace("_", " ")}</Badge>
                   </td>
-                  <td className="px-5 py-3 text-slate-600">{a.institution ?? "—"}</td>
+                  <td className="px-5 py-3 text-slate-600">
+                    {a.institution ?? "—"}
+                    {a.bank_id && (
+                      <span className="ml-2 text-xs text-slate-400">preset</span>
+                    )}
+                  </td>
                   <td className="px-5 py-3 text-right nums">
                     {fmtMoney(a.opening_balance, a.currency)}
                   </td>

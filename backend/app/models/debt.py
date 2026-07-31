@@ -26,6 +26,11 @@ class Debt(Base, TimestampMixin):
         Numeric(14, 2), nullable=False, default=Decimal("0")
     )
     interest_rate_apr: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
+    # Promotional-rate window (e.g. a 0% balance-transfer offer). While today
+    # <= promo_ends_on the promo rate applies; afterwards interest_rate_apr is
+    # the reverting rate. Both NULL = no promo.
+    promo_apr: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
+    promo_ends_on: Mapped[date | None] = mapped_column(Date)
     minimum_payment: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     due_day_of_month: Mapped[int | None] = mapped_column(SmallInteger)
     starts_on: Mapped[date | None] = mapped_column(Date)

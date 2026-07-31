@@ -20,8 +20,42 @@ export interface Account {
   name: string;
   type: AccountType;
   institution: string | null;
+  bank_id: string | null;
   currency: string;
   opening_balance: string;
+}
+
+export interface UkBank {
+  id: string;
+  name: string;
+  account_types: AccountType[];
+  formats: string[];
+  notes: string;
+}
+
+// Mirrors backend ImportProfileConfig; column refs are header names or indexes.
+export interface ImportProfileConfig {
+  delimiter?: string | null;
+  skip_rows?: number;
+  has_header?: boolean;
+  date_column: string | number;
+  description_columns: Array<string | number>;
+  amount_column?: string | number | null;
+  debit_column?: string | number | null;
+  credit_column?: string | number | null;
+  external_id_column?: string | number | null;
+  date_format?: string | null;
+  day_first?: boolean;
+  invert_amount?: boolean;
+  encoding?: string;
+}
+
+export interface ImportProfile {
+  id: number;
+  account_id: number;
+  name: string;
+  source: string;
+  config: ImportProfileConfig;
 }
 
 export interface Category {
@@ -50,11 +84,154 @@ export interface Debt {
   original_principal: string;
   current_balance: string;
   interest_rate_apr: string | null;
+  promo_apr: string | null;
+  promo_ends_on: string | null;
   minimum_payment: string | null;
   due_day_of_month: number | null;
   starts_on: string | null;
   ends_on: string | null;
   notes: string | null;
+}
+
+export interface DebtPlanDebt {
+  id: number;
+  name: string;
+  payoff_date: string | null;
+  interest_paid: string;
+}
+
+export interface PromoCliff {
+  debt_id: number;
+  name: string;
+  promo_ends_on: string;
+  balance_at_expiry: string;
+  reverting_apr: string;
+  extra_yearly_interest: string;
+}
+
+export interface DebtPlan {
+  strategy: string;
+  months: number;
+  debt_free_date: string | null;
+  total_interest: string;
+  total_paid: string;
+  monthly_budget: string;
+  interest_saved_vs_minimum: string | null;
+  months_saved_vs_minimum: number | null;
+  debts: DebtPlanDebt[];
+  balance_series: Array<{ on: string; balance: string }>;
+  promo_cliffs: PromoCliff[];
+  assumptions: string[];
+  unpayable: boolean;
+}
+
+export interface DebtPlanCompare {
+  minimum: DebtPlan;
+  snowball: DebtPlan;
+  avalanche: DebtPlan;
+}
+
+export interface RecurringItem {
+  account_id: number;
+  description: string;
+  cadence: string;
+  cadence_days: number;
+  typical_amount: string;
+  monthly_equivalent: string;
+  occurrences: number;
+  first_seen: string;
+  last_seen: string;
+  next_expected: string;
+  confidence: number;
+  active: boolean;
+  is_income: boolean;
+  category_id: number | null;
+}
+
+export interface ForecastEvent {
+  on: string;
+  description: string;
+  amount: string;
+  cadence: string;
+  is_income: boolean;
+}
+
+export interface Forecast {
+  start_balance: string;
+  reserve: string;
+  days: number;
+  series: Array<{ on: string; balance: string }>;
+  events: ForecastEvent[];
+  due_markers: Array<{ on: string; name: string; minimum_payment: string | null }>;
+  min_balance: string;
+  min_balance_date: string | null;
+  first_below_reserve: string | null;
+  first_below_zero: string | null;
+  safe_to_commit: string;
+}
+
+export interface AccountBalanceInfo {
+  id: number;
+  name: string;
+  type: AccountType;
+  currency: string;
+  balance: string;
+  as_of: string | null;
+  source: string;
+  drift: string | null;
+}
+
+export interface NetWorth {
+  accounts: AccountBalanceInfo[];
+  register_debts: Array<{ id: number; name: string; balance: string }>;
+  assets: string;
+  liabilities: string;
+  net: string;
+  series: Array<{ on: string; assets: string; liabilities: string; net: string }>;
+}
+
+export interface AllocationOption {
+  kind: "debt" | "goal" | "runway";
+  target_id: number | null;
+  name: string;
+  apr: string | null;
+  yearly_interest_saved: string | null;
+  months_earlier: string | null;
+  runway_months_gained: string | null;
+  note: string;
+}
+
+export interface DetectedRaise {
+  description: string;
+  account_id: number;
+  cadence: string;
+  previous_amount: string;
+  new_amount: string;
+  monthly_delta: string;
+}
+
+export interface Surplus {
+  year: number;
+  month: number;
+  income: string;
+  outflows: string;
+  surplus: string;
+  txn_count: number;
+  uncategorized_count: number;
+  uncategorized_amount: string;
+  amount_considered: string;
+  options: AllocationOption[];
+  raises_detected: DetectedRaise[];
+}
+
+export interface AccountCoverage {
+  account_id: number;
+  name: string;
+  type: AccountType;
+  last_txn_on: string | null;
+  txn_count: number;
+  last_import_at: string | null;
+  last_snapshot_on: string | null;
 }
 
 export interface DebtSummary {
@@ -109,64 +286,6 @@ export interface CategoryRule {
 export interface ApplyRulesResponse {
   rules_evaluated: number;
   transactions_updated: number;
-}
-
-export type BankConnectionStatus = "pending" | "linked" | "expired" | "revoked";
-
-export interface BankConnection {
-  id: number;
-  provider: "gocardless";
-  institution_id: string;
-  institution_name: string;
-  status: BankConnectionStatus;
-  requisition_expires_at: string | null;
-  created_at: string;
-}
-
-export interface InstitutionRef {
-  id: string;
-  name: string;
-  bic: string | null;
-  countries: string[];
-  logo_url: string | null;
-}
-
-export interface LinkStartResponse {
-  bank_connection_id: number;
-  requisition_id: string;
-  link_url: string;
-}
-
-export interface DiscoveredAccount {
-  external_account_id: string;
-  iban_last4: string | null;
-  name: string | null;
-  currency: string | null;
-}
-
-export interface LinkCompleteResponse {
-  bank_connection_id: number;
-  institution_name: string;
-  accounts: DiscoveredAccount[];
-}
-
-export type SyncJobStatus = "running" | "success" | "failed";
-
-export interface SyncJob {
-  id: number;
-  bank_connection_id: number;
-  account_id: number | null;
-  started_at: string;
-  completed_at: string | null;
-  status: SyncJobStatus;
-  transactions_fetched: number;
-  transactions_imported: number;
-  error_message: string | null;
-}
-
-export interface SyncResponse {
-  sync_job_ids: number[];
-  queued: number;
 }
 
 export type CashflowKind = "income" | "expense";
