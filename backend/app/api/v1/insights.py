@@ -6,9 +6,10 @@ from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession
 from app.models.account import Account, AccountType, UkWrapper
 from app.models.debt import Debt
@@ -18,18 +19,21 @@ from app.schemas.insights import (
     AllocationOptionOut,
     AllowanceMeterOut,
     AllowancesOut,
+    DigestOut,
+    DigestSendOut,
     ForecastOut,
     NetWorthOut,
     RecurringItemOut,
     SurplusOut,
 )
-from app.services.account_loader import load_account_data, sum_positive_inflows
+from app.services.account_loader import load_account_data, load_txn_lites, sum_positive_inflows
 from app.services.analytics.allowances import compute_allowances, tax_year_bounds
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
 from app.services.analytics.recurring import TxnLite, detect_raises, detect_recurring
 from app.services.analytics.surplus import rank_allocations, summarize_month
+from app.services.digest import compose_digest, send_email
 
 router = APIRouter(prefix="/insights", tags=["insights"])
 
@@ -39,18 +43,7 @@ LIQUID_TYPES = {AccountType.CHECKING, AccountType.SAVINGS, AccountType.CASH}
 
 
 def _txn_lites(db, user_id: int) -> list[TxnLite]:
-    rows = db.execute(
-        select(
-            Transaction.account_id,
-            Transaction.posted_on,
-            Transaction.description,
-            Transaction.amount,
-            Transaction.category_id,
-        )
-        .where(Transaction.user_id == user_id)
-        .order_by(Transaction.posted_on)
-    ).all()
-    return [TxnLite(*row) for row in rows]
+    return load_txn_lites(db, user_id)
 
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
@@ -167,6 +160,31 @@ def allowances(current: CurrentUser, db: DbSession) -> AllowancesOut:
         meters=[AllowanceMeterOut(**asdict(m)) for m in meters],
         wrapped_account_count=len(wrapper_by_account),
     )
+
+
+@router.get("/digest/preview", response_model=DigestOut)
+def digest_preview(current: CurrentUser, db: DbSession) -> DigestOut:
+    """The weekly digest as it would be emailed — works without SMTP."""
+    digest = compose_digest(db, current)
+    return DigestOut(
+        subject=digest.subject,
+        body=digest.body,
+        item_count=digest.item_count,
+        smtp_configured=settings.smtp_configured,
+    )
+
+
+@router.post("/digest/send", response_model=DigestSendOut)
+def digest_send(current: CurrentUser, db: DbSession) -> DigestSendOut:
+    """Compose and email the digest to the signed-in user's address now."""
+    if not settings.smtp_configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SMTP is not configured — set SMTP_HOST in .env",
+        )
+    digest = compose_digest(db, current)
+    send_email(current.email, digest.subject, digest.body)
+    return DigestSendOut(sent_to=current.email, subject=digest.subject)
 
 
 @router.get("/surplus", response_model=SurplusOut)

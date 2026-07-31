@@ -20,6 +20,23 @@ from app.models.account import Account
 from app.models.balance_snapshot import BalanceSnapshot
 from app.models.transaction import Transaction
 from app.services.analytics.net_worth import AccountData
+from app.services.analytics.recurring import TxnLite
+
+
+def load_txn_lites(db: Session, user_id: int) -> list[TxnLite]:
+    """Every transaction as the lightweight shape recurring-detection wants."""
+    rows = db.execute(
+        select(
+            Transaction.account_id,
+            Transaction.posted_on,
+            Transaction.description,
+            Transaction.amount,
+            Transaction.category_id,
+        )
+        .where(Transaction.user_id == user_id)
+        .order_by(Transaction.posted_on)
+    ).all()
+    return [TxnLite(*row) for row in rows]
 
 
 def sum_positive_inflows(
