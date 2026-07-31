@@ -10,18 +10,21 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import AccountType
+from app.models.account import Account, AccountType, UkWrapper
 from app.models.debt import Debt
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.insights import (
     AllocationOptionOut,
+    AllowanceMeterOut,
+    AllowancesOut,
     ForecastOut,
     NetWorthOut,
     RecurringItemOut,
     SurplusOut,
 )
-from app.services.account_loader import load_account_data
+from app.services.account_loader import load_account_data, sum_positive_inflows
+from app.services.analytics.allowances import compute_allowances, tax_year_bounds
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
@@ -125,6 +128,44 @@ def networth(
         liabilities=report.liabilities,
         net=report.net,
         series=[asdict(p) for p in report.series],
+    )
+
+
+@router.get("/allowances", response_model=AllowancesOut)
+def allowances(current: CurrentUser, db: DbSession) -> AllowancesOut:
+    """UK tax-year allowance meters, from contributions into wrapper-tagged
+    accounts (positive transactions within the current tax year; rows described
+    as interest are excluded — interest is not an HMRC subscription)."""
+    today = date.today()
+    start, end = tax_year_bounds(today)
+
+    # Allowances are GBP-denominated; non-GBP accounts are excluded outright
+    # (tagging them is also rejected at the API — belt and braces).
+    wrapped = db.execute(
+        select(Account.id, Account.uk_wrapper).where(
+            Account.user_id == current.id,
+            Account.uk_wrapper.isnot(None),
+            Account.currency == "GBP",
+        )
+    ).all()
+    wrapper_by_account = {account_id: wrapper for account_id, wrapper in wrapped}
+
+    inflows = sum_positive_inflows(
+        db, current.id, wrapper_by_account, start, end, exclude_description_like="%interest%"
+    )
+    contributions: dict[UkWrapper, Decimal] = {wrapper: Decimal("0") for wrapper in wrapper_by_account.values()}
+    for account_id, total in inflows.items():
+        contributions[wrapper_by_account[account_id]] += total
+
+    meters = compute_allowances(contributions)
+    return AllowancesOut(
+        tax_year_start=start,
+        tax_year_end=end,
+        # Inclusive: the last day of the tax year reads "1 day left", not 0 —
+        # contributions made that day still count.
+        days_left=(end - today).days + 1,
+        meters=[AllowanceMeterOut(**asdict(m)) for m in meters],
+        wrapped_account_count=len(wrapper_by_account),
     )
 
 

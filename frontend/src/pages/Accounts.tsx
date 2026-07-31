@@ -3,7 +3,7 @@ import { Plus, Trash2, Wallet } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
 import { api } from "../api/client";
-import type { Account, AccountType, UkBank } from "../api/types";
+import type { Account, AccountType, UkBank, UkWrapper } from "../api/types";
 import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, Select } from "../components/ui";
 import { fmtMoney } from "../lib/format";
 
@@ -33,11 +33,20 @@ export default function Accounts() {
     mutationFn: async (payload: Partial<Account>) => (await api.post("/api/v1/accounts", payload)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
+  const setWrapperMut = useMutation({
+    mutationFn: async (vars: { id: number; uk_wrapper: UkWrapper | null }) =>
+      (await api.patch(`/api/v1/accounts/${vars.id}`, { uk_wrapper: vars.uk_wrapper })).data,
+    onSuccess: () => {
+      for (const key of ["accounts", "allowances", "networth"]) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
   const remove = useMutation({
     mutationFn: async (id: number) => api.delete(`/api/v1/accounts/${id}`),
     onSuccess: () => {
       // Deleting an account cascades into goals (unlink), net worth, and coverage.
-      for (const key of ["accounts", "goals", "networth", "coverage", "transactions"]) {
+      for (const key of ["accounts", "goals", "networth", "coverage", "transactions", "allowances"]) {
         qc.invalidateQueries({ queryKey: [key] });
       }
     },
@@ -50,6 +59,7 @@ export default function Accounts() {
   const [institution, setInstitution] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [opening, setOpening] = useState("0");
+  const [wrapper, setWrapper] = useState("");
 
   const selectedBank = banks.data?.find((b) => b.id === bankId) ?? null;
   const typeOptions = selectedBank ? selectedBank.account_types : ALL_TYPES;
@@ -71,12 +81,13 @@ export default function Accounts() {
         name, type,
         institution: institution || null,
         bank_id: bankId || null,
+        uk_wrapper: (wrapper || null) as UkWrapper | null,
         currency,
         opening_balance: opening as unknown as string,
       },
       {
         onSuccess: () => {
-          setName(""); setBankId(""); setInstitution(""); setOpening("0");
+          setName(""); setBankId(""); setInstitution(""); setOpening("0"); setWrapper("");
           setShowForm(false);
         },
       },
@@ -133,6 +144,15 @@ export default function Accounts() {
               <Label>Opening balance</Label>
               <Input value={opening} onChange={(e) => setOpening(e.target.value)} />
             </label>
+            <label>
+              <Label>UK tax wrapper</Label>
+              <Select value={wrapper} onChange={(e) => setWrapper(e.target.value)}>
+                <option value="">None</option>
+                <option value="isa">ISA</option>
+                <option value="lisa">Lifetime ISA</option>
+                <option value="pension">Pension</option>
+              </Select>
+            </label>
             <div className="md:col-span-6">
               <Button type="submit">Save account</Button>
               {selectedBank && (
@@ -160,6 +180,7 @@ export default function Accounts() {
                 <th className="px-5 py-3 text-left font-medium">Name</th>
                 <th className="w-32 px-5 py-3 text-left font-medium">Type</th>
                 <th className="px-5 py-3 text-left font-medium">Institution</th>
+                <th className="w-32 px-5 py-3 text-left font-medium">UK wrapper</th>
                 <th className="w-40 px-5 py-3 text-right font-medium">Opening balance</th>
                 <th className="w-12 px-5 py-3"></th>
               </tr>
@@ -175,6 +196,27 @@ export default function Accounts() {
                     {a.institution ?? "—"}
                     {a.bank_id && (
                       <span className="ml-2 text-xs text-slate-400">preset</span>
+                    )}
+                  </td>
+                  <td className="px-5 py-3">
+                    {a.currency === "GBP" ? (
+                      <Select
+                        value={a.uk_wrapper ?? ""}
+                        onChange={(e) =>
+                          setWrapperMut.mutate({
+                            id: a.id,
+                            uk_wrapper: (e.target.value || null) as UkWrapper | null,
+                          })
+                        }
+                        className="!w-28 !py-1 text-xs"
+                      >
+                        <option value="">No wrapper</option>
+                        <option value="isa">ISA</option>
+                        <option value="lisa">LISA</option>
+                        <option value="pension">Pension</option>
+                      </Select>
+                    ) : (
+                      <span className="text-xs text-slate-400">—</span>
                     )}
                   </td>
                   <td className="px-5 py-3 text-right nums">

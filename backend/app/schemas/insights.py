@@ -125,6 +125,24 @@ class SurplusOut(BaseModel):
     raises_detected: list[RaiseOut]
 
 
+class AllowanceMeterOut(BaseModel):
+    wrapper: str
+    allowance: Decimal
+    used: Decimal
+    remaining: Decimal
+    lisa_portion: Decimal
+
+
+class AllowancesOut(BaseModel):
+    tax_year_start: date
+    tax_year_end: date
+    # Inclusive of today — 1 on the final day of the tax year.
+    days_left: int
+    meters: list[AllowanceMeterOut]
+    # How many GBP accounts are wrapper-tagged (0 = feature not set up).
+    wrapped_account_count: int
+
+
 class AccountCoverageOut(BaseModel):
     account_id: int
     name: str

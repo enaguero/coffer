@@ -12,10 +12,16 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { Account, NetWorth as NetWorthData } from "../api/types";
-import { Badge, Button, Card, Input, Label, PageHeader, Select, StatCard } from "../components/ui";
+import type { Account, Allowances, NetWorth as NetWorthData } from "../api/types";
+import { Badge, Button, Card, Input, Label, PageHeader, ProgressBar, Select, StatCard } from "../components/ui";
 import { fmtMoney, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
+
+const WRAPPER_LABEL: Record<string, string> = {
+  isa: "ISA allowance",
+  lisa: "Lifetime ISA allowance",
+  pension: "Pension annual allowance",
+};
 
 const SOURCE_TONE: Record<string, "emerald" | "sky" | "slate"> = {
   statement: "emerald",
@@ -34,6 +40,13 @@ export default function NetWorth() {
   const accounts = useQuery({
     queryKey: ["accounts"],
     queryFn: async () => (await api.get<Account[]>("/api/v1/accounts")).data,
+  });
+  const allowances = useQuery({
+    queryKey: ["allowances"],
+    queryFn: async () => (await api.get<Allowances>("/api/v1/insights/allowances")).data,
+    // Only ask once the accounts list shows a wrapped account — saves a wasted
+    // request for users with no UK wrappers.
+    enabled: accounts.data?.some((a) => a.uk_wrapper != null) ?? false,
   });
 
   const [valAccount, setValAccount] = useState("");
@@ -137,6 +150,53 @@ export default function NetWorth() {
           </p>
         )}
       </Card>
+
+      {(allowances.data?.meters.length ?? 0) > 0 && (
+        <Card className="mt-6 p-6">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm font-semibold text-slate-900">UK tax-year allowances</h2>
+            <span className="text-xs text-slate-500 nums">
+              {allowances.data?.tax_year_start} → {allowances.data?.tax_year_end} ·{" "}
+              <strong>{allowances.data?.days_left} days left</strong> — unused allowance doesn't
+              roll over
+            </span>
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-5 md:grid-cols-3">
+            {allowances.data?.meters.map((m) => {
+              const usedPct = toNum(m.used) / Math.max(toNum(m.allowance), 1);
+              return (
+                <div key={m.wrapper}>
+                  <div className="flex items-baseline justify-between text-sm">
+                    <span className="font-medium text-slate-900">
+                      {WRAPPER_LABEL[m.wrapper] ?? m.wrapper}
+                    </span>
+                    <span className="text-xs text-slate-500 nums">
+                      {fmtMoney(m.used, "GBP")} / {fmtMoney(m.allowance, "GBP")}
+                    </span>
+                  </div>
+                  <ProgressBar
+                    value={usedPct}
+                    tone={usedPct >= 1 ? "rose" : usedPct >= 0.75 ? "amber" : "emerald"}
+                    className="mt-2"
+                  />
+                  <div className="mt-1 text-xs text-slate-500 nums">
+                    {fmtMoney(m.remaining, "GBP")} remaining
+                    {m.wrapper === "isa" && toNum(m.lisa_portion) > 0 && (
+                      <> (includes {fmtMoney(m.lisa_portion, "GBP")} via LISA)</>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">
+            Counted from positive transactions into wrapper-tagged GBP accounts this tax year
+            (rows described as interest are excluded). Transfers between your own ISAs may be
+            miscounted, and pension figures omit employer contributions and tax relief — treat
+            the pension meter as a floor. Tag accounts on the Accounts page.
+          </p>
+        </Card>
+      )}
 
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         <Card className="p-6 lg:col-span-2">

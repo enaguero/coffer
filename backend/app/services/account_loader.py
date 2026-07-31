@@ -13,13 +13,45 @@ from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
 from app.models.balance_snapshot import BalanceSnapshot
 from app.models.transaction import Transaction
 from app.services.analytics.net_worth import AccountData
+
+
+def sum_positive_inflows(
+    db: Session,
+    user_id: int,
+    account_ids: Iterable[int],
+    start: date,
+    end: date,
+    exclude_description_like: str | None = None,
+) -> dict[int, Decimal]:
+    """Per-account sum of positive transactions in [start, end], zero-prefilled
+    so 'no inflows' reads as £0 rather than unknown. Shared by goal funding
+    (month-to-date) and allowance metering (tax year)."""
+    ids = set(account_ids)
+    if not ids:
+        return {}
+    totals: dict[int, Decimal] = {account_id: Decimal("0") for account_id in ids}
+    query = (
+        select(Transaction.account_id, func.sum(Transaction.amount))
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.account_id.in_(ids),
+            Transaction.amount > 0,
+            Transaction.posted_on >= start,
+            Transaction.posted_on <= end,
+        )
+        .group_by(Transaction.account_id)
+    )
+    if exclude_description_like:
+        query = query.where(~Transaction.description.ilike(exclude_description_like))
+    totals.update(dict(db.execute(query).all()))
+    return totals
 
 
 def load_account_data(db: Session, user_id: int, account_ids: Iterable[int] | None = None) -> list[AccountData]:

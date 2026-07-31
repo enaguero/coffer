@@ -70,8 +70,19 @@ def account_coverage(current: CurrentUser, db: DbSession) -> list[AccountCoverag
     ]
 
 
+def _check_wrapper_currency(currency: str | None, uk_wrapper) -> None:
+    """UK tax wrappers are GBP-denominated — a USD 'ISA' would meter dollars
+    against sterling allowances."""
+    if uk_wrapper is not None and currency != "GBP":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="UK tax wrappers require a GBP account",
+        )
+
+
 @router.post("", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
 def create_account(payload: AccountCreate, current: CurrentUser, db: DbSession) -> Account:
+    _check_wrapper_currency(payload.currency, payload.uk_wrapper)
     account = Account(user_id=current.id, **payload.model_dump())
     db.add(account)
     db.commit()
@@ -94,7 +105,9 @@ def get_account(account_id: int, current: CurrentUser, db: DbSession) -> Account
 @router.patch("/{account_id}", response_model=AccountOut)
 def update_account(account_id: int, payload: AccountUpdate, current: CurrentUser, db: DbSession) -> Account:
     account = _get_owned(db, current, account_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    _check_wrapper_currency(data.get("currency", account.currency), data.get("uk_wrapper", account.uk_wrapper))
+    for key, value in data.items():
         setattr(account, key, value)
     db.commit()
     db.refresh(account)

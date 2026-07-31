@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.account import AccountType
+from app.models.account import AccountType, UkWrapper
 from app.services.import_engine.catalog import get_bank
 
 
@@ -18,6 +18,7 @@ class AccountBase(BaseModel):
     type: AccountType
     institution: str | None = None
     bank_id: str | None = None
+    uk_wrapper: UkWrapper | None = None
     currency: str = Field(default="USD", min_length=3, max_length=3)
     opening_balance: Decimal = Decimal("0")
 
@@ -33,6 +34,7 @@ class AccountUpdate(BaseModel):
     type: AccountType | None = None
     institution: str | None = None
     bank_id: str | None = None
+    uk_wrapper: UkWrapper | None = None
     currency: str | None = None
     opening_balance: Decimal | None = None
 
