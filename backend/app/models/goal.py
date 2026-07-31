@@ -18,6 +18,12 @@ class Goal(Base, TimestampMixin):
         Numeric(14, 2), nullable=False, default=Decimal("0")
     )
     target_date: Mapped[date | None] = mapped_column(Date)
+    # Funding: when linked to a savings account, progress derives from that
+    # account's balance instead of the hand-edited current_amount, and
+    # contributions are counted from its imported transactions.
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+    # The user's committed monthly contribution (their plan, not a computed value).
+    monthly_contribution: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     notes: Mapped[str | None] = mapped_column(String(1000))
 
     user: Mapped["User"] = relationship(back_populates="goals")  # noqa: F821

@@ -264,8 +264,15 @@ export interface Goal {
   target_amount: string;
   current_amount: string;
   target_date: string | null;
+  account_id: number | null;
+  monthly_contribution: string | null;
   notes: string | null;
   progress: number;
+  auto_tracked: boolean;
+  required_monthly: string | null;
+  on_track: boolean | null;
+  funded_this_month: string | null;
+  projected_date: string | null;
 }
 
 export interface ImportResponse {
