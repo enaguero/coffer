@@ -50,7 +50,7 @@ services:
       - ./backend:/app
       - backend_uploads:/app/uploads
       - backend_backups:/app/backups
-      - backend_inbox:/app/inbox
+      - ./inbox:/app/inbox
       - backend_venv:/app/.venv
     command: >
       sh -c "uv run python -m app.prestart &&
@@ -77,6 +77,5 @@ volumes:
   postgres_data:
   backend_uploads:
   backend_backups:
-  backend_inbox:
   backend_venv:
   frontend_node_modules:

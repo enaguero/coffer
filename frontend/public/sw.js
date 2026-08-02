@@ -20,12 +20,17 @@ async function handleShare(request) {
   const form = await request.formData();
   const files = form.getAll("statements").filter((f) => typeof f === "object");
   const cache = await caches.open(SHARE_CACHE);
+  let i = 0;
   for (const file of files) {
+    i += 1;
     await cache.put(
-      new Request(`/shared/${Date.now()}-${encodeURIComponent(file.name)}`),
-      new Response(file, { headers: { "X-Filename": file.name } }),
+      // Index guards same-millisecond, same-name collisions within one share.
+      new Request(`/shared/${Date.now()}-${i}-${encodeURIComponent(file.name)}`),
+      // Header values are Latin-1 only — encode so "John’s statement.pdf" and
+      // non-Latin scripts survive instead of throwing and killing the share.
+      new Response(file, { headers: { "X-Filename": encodeURIComponent(file.name) } }),
     );
   }
   // Land on the Import page, which uploads the parked files to the inbox.
-  return Response.redirect("/import?shared=1", 303);
+  return Response.redirect("/import", 303);
 }

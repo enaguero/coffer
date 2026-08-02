@@ -43,28 +43,42 @@ interface InboxFile {
 
 const SHARE_CACHE = "coffer-shared-files";
 
+let drainInFlight = false;
+
 /** Files parked by the service worker's share-target handler → inbox API. */
 async function drainSharedFiles(): Promise<number> {
-  if (!("caches" in window)) return 0;
-  const cache = await caches.open(SHARE_CACHE);
-  const keys = await cache.keys();
+  if (!("caches" in window) || drainInFlight) return 0;
+  drainInFlight = true;
   let uploaded = 0;
-  for (const key of keys) {
-    const resp = await cache.match(key);
-    if (!resp) continue;
-    const blob = await resp.blob();
-    const name = resp.headers.get("X-Filename") ?? "shared-statement";
-    const fd = new FormData();
-    fd.append("file", new File([blob], name));
-    try {
-      await api.post("/api/v1/imports/inbox", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      await cache.delete(key);
-      uploaded += 1;
-    } catch {
-      // Leave it parked; the next visit retries.
+  try {
+    const cache = await caches.open(SHARE_CACHE);
+    const keys = await cache.keys();
+    for (const key of keys) {
+      const resp = await cache.match(key);
+      if (!resp) continue;
+      const blob = await resp.blob();
+      const raw = resp.headers.get("X-Filename");
+      const name = raw ? decodeURIComponent(raw) : "shared-statement.csv";
+      const fd = new FormData();
+      fd.append("file", new File([blob], name));
+      try {
+        await api.post("/api/v1/imports/inbox", fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        await cache.delete(key);
+        uploaded += 1;
+      } catch (err) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status && status >= 400 && status < 500) {
+          // Deterministic rejection (bad type, too large) — retrying forever
+          // would make an invisible zombie. Drop it.
+          await cache.delete(key);
+        }
+        // Transient/network failures stay parked for the next visit.
+      }
     }
+  } finally {
+    drainInFlight = false;
   }
   return uploaded;
 }
@@ -286,6 +300,13 @@ export default function Import() {
           </ul>
           {!accountId && (
             <p className="mt-2 text-xs text-amber-700">Select an account in the form below to enable review.</p>
+          )}
+          {inboxPreviewMut.isError && (
+            <p className="mt-2 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
+              Couldn't parse that file:{" "}
+              {((inboxPreviewMut.error as { response?: { data?: { detail?: string } } })?.response
+                ?.data?.detail) ?? "check it's a valid statement."}
+            </p>
           )}
         </Card>
       )}

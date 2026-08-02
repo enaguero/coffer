@@ -316,6 +316,8 @@ def _create_preview(
 # the file to processed/ (the preview stores its own copy in uploads).
 
 MAX_INBOX_FILE_BYTES = 10 * 1024 * 1024
+MAX_INBOX_NAME_LEN = 128
+PROCESSED_KEEP = 20
 
 
 def _inbox_pending_dir(user_id: int) -> Path:
@@ -325,12 +327,35 @@ def _inbox_pending_dir(user_id: int) -> Path:
 def _safe_inbox_file(user_id: int, filename: str) -> Path:
     """Resolve a pending-inbox filename, rejecting traversal attempts."""
     name = Path(filename).name  # strips any directory components
-    if not name or name != filename:
+    if not name or name != filename or "\x00" in name or len(name) > MAX_INBOX_NAME_LEN:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
     pending = _inbox_pending_dir(user_id)
-    target = (pending / name).resolve()
-    if not target.is_relative_to(pending.resolve()):
+    try:
+        target = (pending / name).resolve()
+        contained = target.is_relative_to(pending.resolve())
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename") from exc
+    if not contained:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
+    return target
+
+
+def _inbox_file_out(f: Path) -> "InboxFileOut":
+    stat = f.stat()
+    return InboxFileOut(
+        filename=f.name,
+        size=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+    )
+
+
+def _unique_path(directory: Path, name: str) -> Path:
+    """Never overwrite: same-named files get a numbered suffix."""
+    target = directory / name
+    counter = 1
+    while target.exists():
+        target = directory / f"{Path(name).stem}-{counter}{Path(name).suffix}"
+        counter += 1
     return target
 
 
@@ -347,15 +372,15 @@ def list_inbox(current: CurrentUser) -> list[InboxFileOut]:
         return []
     out = []
     for f in sorted(pending.iterdir()):
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-            stat = f.stat()
-            out.append(
-                InboxFileOut(
-                    filename=f.name,
-                    size=stat.st_size,
-                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
-                )
-            )
+        # Skip symlinks outright: sync tools (Syncthing) propagate them, and a
+        # link pointing outside the inbox would otherwise leak stat() metadata
+        # while being unreadable AND undeletable through the API.
+        if f.is_symlink() or not f.is_file() or f.suffix.lower() not in ALLOWED_EXTENSIONS:
+            continue
+        try:
+            out.append(_inbox_file_out(f))
+        except FileNotFoundError:
+            continue  # vanished between listing and stat — external writers race us
     return out
 
 
@@ -406,12 +431,27 @@ def preview_inbox_file(
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
 
-    response = _create_preview(db, current, account, content, suffix, target.name)
-
-    # The preview stored its own copy under uploads — archive the inbox copy.
+    # Claim the file FIRST (move to processed/) so a concurrent Review of the
+    # same file 404s instead of double-previewing; move it back if the preview
+    # fails so nothing is lost.
     processed = target.parent.parent / "processed"
     processed.mkdir(parents=True, exist_ok=True)
-    target.rename(processed / target.name)
+    archived = _unique_path(processed, target.name)
+    try:
+        target.rename(archived)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox file not found") from exc
+    try:
+        response = _create_preview(db, current, account, content, suffix, target.name)
+    except Exception:
+        archived.rename(target)  # give the file back — the preview never happened
+        raise
+
+    # Keep the archive bounded; uploads/ already holds the canonical copy.
+    old = sorted(processed.iterdir(), key=lambda p: p.stat().st_mtime)
+    for stale in old[:-PROCESSED_KEEP]:
+        if stale.is_file():
+            stale.unlink(missing_ok=True)
     return response
 
 
@@ -420,7 +460,7 @@ def discard_inbox_file(filename: str, current: CurrentUser) -> None:
     target = _safe_inbox_file(current.id, filename)
     if not target.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox file not found")
-    target.unlink()
+    target.unlink(missing_ok=True)  # a racing preview/discard already removed it — fine
 
 
 def _get_owned_import(db, current, import_id: int) -> StatementImport:

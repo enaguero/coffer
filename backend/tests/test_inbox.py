@@ -119,3 +119,30 @@ def test_oversize_and_bad_type_rejected(auth_client) -> None:
     assert r.status_code == 413
     r = _drop(client, headers, name="evil.exe", content=b"MZ")
     assert r.status_code == 400
+
+
+def test_processed_archive_never_overwritten(auth_client) -> None:
+    client, headers, user_id = auth_client
+    account_id = _account(client, headers)
+
+    _drop(client, headers)  # stmt.csv
+    r = client.post("/api/v1/imports/inbox/stmt.csv/preview", headers=headers, json={"account_id": account_id})
+    assert r.status_code == 200
+    _drop(client, headers, content=CSV.replace(b"COFFEE", b"TEA-42"))  # different stmt.csv
+    r = client.post("/api/v1/imports/inbox/stmt.csv/preview", headers=headers, json={"account_id": account_id})
+    assert r.status_code == 200
+
+    processed = Path(settings.inbox_dir) / str(user_id) / "processed"
+    names = sorted(p.name for p in processed.iterdir())
+    assert names == ["stmt-1.csv", "stmt.csv"]  # both archives kept
+
+
+def test_symlinks_hidden_from_listing(auth_client) -> None:
+    client, headers, user_id = auth_client
+    pending = Path(settings.inbox_dir) / str(user_id) / "pending"
+    pending.mkdir(parents=True)
+    outside = Path(settings.inbox_dir) / "outside.csv"
+    outside.write_bytes(CSV)
+    (pending / "sneaky.csv").symlink_to(outside)
+
+    assert client.get("/api/v1/imports/inbox", headers=headers).json() == []

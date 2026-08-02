@@ -14,9 +14,8 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { useEffect } from "react";
 
 import { useAuth } from "../contexts/useAuth";
 
@@ -65,6 +64,14 @@ export default function Layout() {
         </div>
         <div className="text-base font-bold tracking-tight">Coffer</div>
       </div>
+
+      {menuOpen && (
+        <div
+          className="fixed inset-0 z-20 bg-slate-900/30 md:hidden"
+          onClick={() => setMenuOpen(false)}
+          aria-hidden="true"
+        />
+      )}
 
       <aside
         className={`${menuOpen ? "translate-x-0" : "-translate-x-full"} fixed inset-y-0 left-0 z-30 flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white pt-14 transition-transform md:static md:translate-x-0 md:pt-0`}
