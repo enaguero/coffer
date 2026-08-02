@@ -34,6 +34,8 @@ services:
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       UPLOAD_DIR: /app/uploads
+      BACKUP_DIR: ${BACKUP_DIR:-/app/backups}
+      BACKUP_KEEP: ${BACKUP_KEEP:-5}
       COFFER_ENV: ${COFFER_ENV:-dev}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -46,9 +48,10 @@ services:
     volumes:
       - ./backend:/app
       - backend_uploads:/app/uploads
+      - backend_backups:/app/backups
       - backend_venv:/app/.venv
     command: >
-      sh -c "uv run alembic upgrade head &&
+      sh -c "uv run python -m app.prestart &&
              uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   frontend:
@@ -71,5 +74,6 @@ services:
 volumes:
   postgres_data:
   backend_uploads:
+  backend_backups:
   backend_venv:
   frontend_node_modules:

@@ -78,3 +78,12 @@ test-backend:
 
 clean:
 	docker compose down -v
+
+backup: ## create a Coffer Archive (DB + statements + manifest)
+	docker compose exec -T backend uv run python -m app.backup create
+
+backup-verify: ## restore-drill the newest archive into a scratch DB
+	docker compose exec -T backend uv run python -m app.backup verify
+
+backup-list: ## list archives and backup status
+	docker compose exec -T backend uv run python -m app.backup list

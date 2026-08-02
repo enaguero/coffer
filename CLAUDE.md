@@ -19,6 +19,8 @@ make seed                  # load demo user (demo@coffer.dev / demo1234)
 make seed-reset            # wipe demo user and reseed
 make fresh                 # NUKE db volume, rebuild, restart, migrate, seed
 make test-backend          # pytest inside backend container
+make backup                # create a Coffer Archive (DB + statements + manifest)
+make backup-verify         # restore-drill the newest archive into a scratch DB
 make bash-backend          # shell into backend container
 make bash-db               # psql into the database
 ```
@@ -51,7 +53,7 @@ Test database (`coffer_test`) is created at session start by the conftest, schem
 FastAPI + SQLAlchemy 2 (declarative `Mapped[...]`) + Alembic, Python 3.12 managed by `uv`.
 
 - `main.py` mounts CORS, slowapi middleware, and the `api_router`. Health at `/health`.
-- `api/v1/router.py` aggregates per-resource routers under `/api/v1`: `accounts`, `auth`, `banks`, `budgets`, `cashflow`, `categories`, `category_rules`, `debts`, `goals`, `imports`, `insights`, `transactions`. `insights` serves the analytics endpoints (recurring, forecast, networth, allowances, surplus, digest preview/send).
+- `api/v1/router.py` aggregates per-resource routers under `/api/v1`: `accounts`, `auth`, `backup`, `banks`, `budgets`, `cashflow`, `categories`, `category_rules`, `debts`, `goals`, `imports`, `insights`, `transactions`. `insights` serves the analytics endpoints (recurring, forecast, networth, allowances, surplus, digest preview/send).
 - `core/deps.py` exports `CurrentUser` (JWT-authenticated `User`) and `DbSession`. **Auth is dual-mode**: `get_current_user` reads the HttpOnly session cookie first (`COOKIE_NAME` in `core/cookies.py`), then falls back to the OAuth2 Bearer header — browsers use the cookie, `/docs` and API clients use Bearer. Every per-user query filters by `current.id`.
 - `core/config.py` — pydantic settings. `assert_production_safe()` runs at import and refuses to boot if `JWT_SECRET` is unset, a known placeholder, or under 32 chars, unless `COFFER_ENV` is `dev` or `test`.
 - `core/security.py` — bcrypt password hashing + PyJWT encode/decode (`sub = user_id`).
@@ -96,5 +98,8 @@ API base URL comes from `VITE_API_URL` (defaults to `http://localhost:8000` in d
 - `VITE_API_URL`
 - `COFFER_ENV` — `dev` / `test` to relax JWT-secret and rate-limit guards. Anything else is production.
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS` — weekly digest email delivery; empty `SMTP_HOST` disables sending (the in-app preview still works). **These must also be passed through `docker-compose.yml`'s backend `environment:` block — the container does not read the root `.env` directly.**
+- `BACKUP_DIR` (default `/app/backups`, a named volume), `BACKUP_KEEP` (archive generations to retain) — also passed through the compose `environment:` block.
+
+**Backups (Coffer Archive)**: the compose start command runs `python -m app.prestart`, which snapshots a `pre-upgrade` archive whenever pending migrations are detected on a non-empty DB, then migrates. The archive is a zip of per-table JSONL (readable without Coffer) + the original statement files + a checksummed manifest; a bare `pg_dump` misses the statement files. `python -m app.backup create|verify|restore|list` — `verify` is a real restore drill into a scratch database (schedule `create && verify` with weekly host cron). Restore refuses alembic-revision mismatches without `--force`. `GET /backup/export` is the per-user portability zip; instance restore is CLI-only.
 
 The weekly digest sender is `docker compose exec -T backend uv run python -m app.digest` (one email per user, to their login address) — schedule it with host cron. `GET /api/v1/insights/digest/preview` renders the same content in-app without SMTP.
