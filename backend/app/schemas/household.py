@@ -1,11 +1,21 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.models.account import AccountType
 
 
 class HouseholdCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
 
 
 class HouseholdMemberOut(BaseModel):
@@ -24,6 +34,7 @@ class HouseholdOut(BaseModel):
 
 
 class InviteOut(BaseModel):
+    id: int
     token: str
     expires_at: datetime
 
@@ -37,11 +48,11 @@ class SharedAccountOut(BaseModel):
     owner_user_id: int
     owner_name: str
     name: str
-    type: str
+    type: AccountType
     currency: str
     balance: Decimal
-    as_of: str | None  # ISO date of the freshest information used
-    source: str
+    as_of: date | None  # date of the freshest information used
+    source: str  # "statement" | "manual" | "derived" | "opening"
 
 
 class SharedCurrencyTotalOut(BaseModel):

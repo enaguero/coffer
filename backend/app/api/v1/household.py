@@ -11,11 +11,12 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.core.deps import CurrentUser, DbSession
 from app.core.rate_limit import limiter
-from app.models.account import Account
+from app.models.account import Account, AccountVisibility
 from app.models.household import Household, HouseholdInvite, HouseholdMember, HouseholdRole
 from app.models.user import User
 from app.schemas.household import (
@@ -38,6 +39,27 @@ INVITE_TTL_DAYS = 7
 
 def _my_membership(db, user_id: int) -> HouseholdMember | None:
     return db.scalar(select(HouseholdMember).where(HouseholdMember.user_id == user_id))
+
+
+def _reset_shared_accounts(db, user_id: int) -> None:
+    """Sharing consent belongs to ONE household: joining or leaving resets the
+    user's household-visible accounts to private, so a flag granted to a
+    previous household can never silently expose balances to the next one."""
+    db.execute(
+        update(Account)
+        .where(Account.user_id == user_id, Account.visibility == AccountVisibility.HOUSEHOLD)
+        .values(visibility=AccountVisibility.PRIVATE)
+    )
+
+
+def _revoke_unused_invites(db, household_id: int) -> None:
+    """Membership changed — outstanding invites were minted under a different
+    roster and can no longer be vouched for."""
+    db.execute(
+        delete(HouseholdInvite).where(
+            HouseholdInvite.household_id == household_id, HouseholdInvite.used_at.is_(None)
+        )
+    )
 
 
 def _household_out(db, household: Household, me_id: int, my_role: str) -> HouseholdOut:
@@ -76,21 +98,42 @@ def my_household(current: CurrentUser, db: DbSession) -> HouseholdOut | None:
 def create_household(payload: HouseholdCreate, current: CurrentUser, db: DbSession) -> HouseholdOut:
     if _my_membership(db, current.id) is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You already belong to a household")
-    household = Household(name=payload.name.strip())
+    household = Household(name=payload.name)
     db.add(household)
     db.flush()
     db.add(HouseholdMember(household_id=household.id, user_id=current.id, role=HouseholdRole.OWNER))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent create/join won the race for this user's one membership.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="You already belong to a household"
+        ) from None
     return _household_out(db, household, current.id, HouseholdRole.OWNER.value)
 
 
-@router.post("/invites", response_model=InviteOut, status_code=status.HTTP_201_CREATED)
-def create_invite(current: CurrentUser, db: DbSession) -> InviteOut:
-    membership = _my_membership(db, current.id)
+def _owner_membership(db, user_id: int) -> HouseholdMember:
+    membership = _my_membership(db, user_id)
     if membership is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="You don't belong to a household")
     if membership.role != HouseholdRole.OWNER:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the owner can invite")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the owner can manage invites")
+    return membership
+
+
+@router.post("/invites", response_model=InviteOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/hour")
+def create_invite(request: Request, current: CurrentUser, db: DbSession) -> InviteOut:
+    membership = _owner_membership(db, current.id)
+    # Expired invites are dead weight — prune them whenever a new one is cut.
+    db.execute(
+        delete(HouseholdInvite).where(
+            HouseholdInvite.household_id == membership.household_id,
+            HouseholdInvite.used_at.is_(None),
+            HouseholdInvite.expires_at < datetime.now(UTC),
+        )
+    )
     invite = HouseholdInvite(
         household_id=membership.household_id,
         created_by=current.id,
@@ -99,7 +142,38 @@ def create_invite(current: CurrentUser, db: DbSession) -> InviteOut:
     )
     db.add(invite)
     db.commit()
-    return InviteOut(token=invite.token, expires_at=invite.expires_at)
+    return InviteOut(id=invite.id, token=invite.token, expires_at=invite.expires_at)
+
+
+@router.get("/invites", response_model=list[InviteOut])
+def list_invites(current: CurrentUser, db: DbSession) -> list[InviteOut]:
+    """Outstanding (unused, unexpired) invites — so a leaked token is at
+    least visible and revocable."""
+    membership = _owner_membership(db, current.id)
+    invites = db.scalars(
+        select(HouseholdInvite).where(
+            HouseholdInvite.household_id == membership.household_id,
+            HouseholdInvite.used_at.is_(None),
+            HouseholdInvite.expires_at >= datetime.now(UTC),
+        )
+    )
+    return [InviteOut(id=i.id, token=i.token, expires_at=i.expires_at) for i in invites]
+
+
+@router.delete("/invites/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_invite(invite_id: int, current: CurrentUser, db: DbSession) -> None:
+    membership = _owner_membership(db, current.id)
+    invite = db.scalar(
+        select(HouseholdInvite).where(
+            HouseholdInvite.id == invite_id,
+            HouseholdInvite.household_id == membership.household_id,
+            HouseholdInvite.used_at.is_(None),
+        )
+    )
+    if invite is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invite not found")
+    db.delete(invite)
+    db.commit()
 
 
 @router.post("/join", response_model=HouseholdOut)
@@ -107,16 +181,35 @@ def create_invite(current: CurrentUser, db: DbSession) -> InviteOut:
 def join_household(request: Request, payload: JoinRequest, current: CurrentUser, db: DbSession) -> HouseholdOut:
     if _my_membership(db, current.id) is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You already belong to a household")
-    invite = db.scalar(select(HouseholdInvite).where(HouseholdInvite.token == payload.token))
     now = datetime.now(UTC)
-    if invite is None or invite.used_at is not None or invite.expires_at < now:
+    # Atomic claim: the conditional UPDATE is the single-use guarantee — two
+    # concurrent redemptions can't both see "unused" and both join.
+    claimed = db.execute(
+        update(HouseholdInvite)
+        .where(
+            HouseholdInvite.token == payload.token,
+            HouseholdInvite.used_at.is_(None),
+            HouseholdInvite.expires_at >= now,
+        )
+        .values(used_by=current.id, used_at=now)
+        .returning(HouseholdInvite.household_id)
+    ).first()
+    if claimed is None:
         # One answer for unknown, used, and expired — no token oracle.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invite not valid")
-    invite.used_by = current.id
-    invite.used_at = now
-    db.add(HouseholdMember(household_id=invite.household_id, user_id=current.id, role=HouseholdRole.MEMBER))
-    db.commit()
-    household = db.get(Household, invite.household_id)
+    household_id = claimed[0]
+    # Joining a new household never inherits sharing consent granted to a
+    # previous one.
+    _reset_shared_accounts(db, current.id)
+    db.add(HouseholdMember(household_id=household_id, user_id=current.id, role=HouseholdRole.MEMBER))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="You already belong to a household"
+        ) from None
+    household = db.get(Household, household_id)
     return _household_out(db, household, current.id, HouseholdRole.MEMBER.value)
 
 
@@ -140,6 +233,10 @@ def remove_member(user_id: int, current: CurrentUser, db: DbSession) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The owner can't be removed")
     household_id = membership.household_id
     db.delete(target)
+    # Departure revokes the leaver's sharing consent and every outstanding
+    # invite — the roster they were minted under no longer exists.
+    _reset_shared_accounts(db, user_id)
+    _revoke_unused_invites(db, household_id)
     db.flush()
     # Last one out turns off the lights — an empty household is meaningless.
     remaining = db.scalar(select(HouseholdMember).where(HouseholdMember.household_id == household_id))

@@ -463,6 +463,7 @@ export interface Household {
 }
 
 export interface HouseholdInvite {
+  id: number;
   token: string;
   expires_at: string;
 }

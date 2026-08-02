@@ -155,6 +155,64 @@ def test_shared_view_requires_membership_and_stays_isolated(auth_client) -> None
     assert view["accounts"] == []
 
 
+def test_leaving_resets_sharing_and_revokes_invites(auth_client) -> None:
+    """Consent belongs to one household: leaving resets visibility, and the
+    roster change revokes outstanding invites."""
+    client, owner, _ = auth_client
+    _create_household(client, owner)
+    partner = _signup(client, "partner5@coffer.dev")
+    _join(client, partner, _invite(client, owner))
+    partner_id = client.get("/api/v1/auth/me", headers=partner).json()["id"]
+    shared_id = _account(client, partner, name="Partner Shared", visibility="household")
+
+    unused_token = _invite(client, owner)  # outstanding when partner leaves
+    assert client.delete(f"/api/v1/household/members/{partner_id}", headers=partner).status_code == 204
+
+    # The departed member's account is private again...
+    accounts = client.get("/api/v1/accounts", headers=partner).json()
+    assert next(a for a in accounts if a["id"] == shared_id)["visibility"] == "private"
+    # ...and the pre-departure invite no longer works.
+    late = _signup(client, "late-joiner@coffer.dev")
+    assert client.post("/api/v1/household/join", headers=late, json={"token": unused_token}).status_code == 404
+
+
+def test_joining_a_new_household_does_not_inherit_old_consent(auth_client) -> None:
+    client, owner, owner_id = auth_client
+    _create_household(client, owner)
+    shared_id = _account(client, owner, name="Was Shared", visibility="household")
+    # Leave (deletes the single-member household), then join someone else's.
+    assert client.delete(f"/api/v1/household/members/{owner_id}", headers=owner).status_code == 204
+
+    other = _signup(client, "newhouse@coffer.dev")
+    _create_household(client, other, name="New House")
+    _join(client, owner, _invite(client, other))
+
+    view = client.get("/api/v1/household/shared", headers=other).json()
+    assert view["accounts"] == []  # old consent did not carry over
+    accounts = client.get("/api/v1/accounts", headers=owner).json()
+    assert next(a for a in accounts if a["id"] == shared_id)["visibility"] == "private"
+
+
+def test_invite_listing_and_revocation(auth_client) -> None:
+    client, owner, _ = auth_client
+    _create_household(client, owner)
+    token = _invite(client, owner)
+
+    invites = client.get("/api/v1/household/invites", headers=owner).json()
+    assert len(invites) == 1 and invites[0]["token"] == token
+
+    assert client.delete(f"/api/v1/household/invites/{invites[0]['id']}", headers=owner).status_code == 204
+    assert client.get("/api/v1/household/invites", headers=owner).json() == []
+
+    joiner = _signup(client, "revoked@coffer.dev")
+    assert client.post("/api/v1/household/join", headers=joiner, json={"token": token}).status_code == 404
+
+
+def test_household_name_must_not_be_blank(auth_client) -> None:
+    client, owner, _ = auth_client
+    assert client.post("/api/v1/household", headers=owner, json={"name": "   "}).status_code == 422
+
+
 def test_visibility_is_editable_and_validated(auth_client) -> None:
     client, owner, _ = auth_client
     account_id = _account(client, owner, name="Mine")

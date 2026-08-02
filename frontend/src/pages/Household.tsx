@@ -5,9 +5,16 @@ import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Household as HouseholdData, HouseholdInvite, SharedView } from "../api/types";
-import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, WarningBanner } from "../components/ui";
+import { Badge, Button, Card, Input, Label, PageHeader, WarningBanner } from "../components/ui";
 import { apiErrorDetail } from "../lib/apiError";
 import { fmtMoney } from "../lib/format";
+
+const SOURCE_TONE: Record<string, "emerald" | "sky" | "slate"> = {
+  statement: "emerald",
+  manual: "sky",
+  derived: "slate",
+  opening: "slate",
+};
 
 export default function Household() {
   const qc = useQueryClient();
@@ -23,8 +30,7 @@ export default function Household() {
 
   const [name, setName] = useState("");
   const [joinToken, setJoinToken] = useState("");
-  const [invite, setInvite] = useState<HouseholdInvite | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<number | null>(null);
 
   const invalidate = () => {
     for (const key of ["household", "household-shared"]) qc.invalidateQueries({ queryKey: [key] });
@@ -43,18 +49,26 @@ export default function Household() {
       invalidate();
     },
   });
+  const isOwnerRole = household.data?.my_role === "owner";
+  const invites = useQuery({
+    queryKey: ["household-invites"],
+    queryFn: async () => (await api.get<HouseholdInvite[]>("/api/v1/household/invites")).data,
+    enabled: isOwnerRole,
+  });
+  const invalidateInvites = () => qc.invalidateQueries({ queryKey: ["household-invites"] });
   const inviteMut = useMutation({
     mutationFn: async () => (await api.post<HouseholdInvite>("/api/v1/household/invites")).data,
-    onSuccess: (data) => {
-      setInvite(data);
-      setCopied(false);
-    },
+    onSuccess: invalidateInvites,
+  });
+  const revokeInviteMut = useMutation({
+    mutationFn: async (id: number) => api.delete(`/api/v1/household/invites/${id}`),
+    onSuccess: invalidateInvites,
   });
   const removeMut = useMutation({
     mutationFn: async (userId: number) => api.delete(`/api/v1/household/members/${userId}`),
     onSuccess: () => {
-      setInvite(null);
       invalidate();
+      invalidateInvites();
     },
   });
 
@@ -68,11 +82,10 @@ export default function Household() {
     if (joinToken.trim()) joinMut.mutate();
   }
 
-  async function copyToken() {
-    if (!invite) return;
+  async function copyToken(inv: HouseholdInvite) {
     try {
-      await navigator.clipboard.writeText(invite.token);
-      setCopied(true);
+      await navigator.clipboard.writeText(inv.token);
+      setCopied(inv.id);
     } catch {
       // Clipboard can be blocked — the token stays visible for manual copy.
     }
@@ -157,7 +170,15 @@ export default function Household() {
                       <button
                         onClick={() => removeMut.mutate(m.user_id)}
                         className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
-                        title={m.is_me ? "Leave household" : "Remove member"}
+                        title={
+                          !m.is_me
+                            ? "Remove member (their shared accounts turn private; open invites are revoked)"
+                            : h.members.length === 1
+                              ? "Leave — you're the last member, so the household is deleted"
+                              : isOwner
+                                ? "Leave — ownership passes to the longest-standing member"
+                                : "Leave household (your shared accounts turn private)"
+                        }
                       >
                         {m.is_me ? <LogOut className="h-4 w-4" /> : <X className="h-4 w-4" />}
                       </button>
@@ -165,31 +186,55 @@ export default function Household() {
                   </li>
                 ))}
               </ul>
+              {removeMut.isError && (
+                <p className="mt-2 text-xs text-rose-600">
+                  {apiErrorDetail(removeMut.error, "Couldn't change membership — reload and try again.")}
+                </p>
+              )}
 
               {isOwner && (
                 <div className="mt-4 border-t border-slate-100 pt-4">
                   <Button className="!py-1.5" onClick={() => inviteMut.mutate()} disabled={inviteMut.isPending}>
                     <UserPlus className="h-4 w-4" /> New invite token
                   </Button>
-                  {invite && (
-                    <div className="mt-2">
-                      <div className="flex items-center gap-2">
-                        <code className="min-w-0 flex-1 truncate rounded bg-slate-100 px-2 py-1 text-xs">
-                          {invite.token}
-                        </code>
-                        <button
-                          onClick={copyToken}
-                          className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                          title="Copy token"
-                        >
-                          {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-                        </button>
-                      </div>
-                      <p className="mt-1 text-xs text-slate-400">
-                        Single-use, expires {new Date(invite.expires_at).toLocaleDateString()}. Send it to
-                        the person joining.
-                      </p>
-                    </div>
+                  {inviteMut.isError && (
+                    <p className="mt-2 text-xs text-rose-600">
+                      {apiErrorDetail(inviteMut.error, "Couldn't create an invite.")}
+                    </p>
+                  )}
+                  {(invites.data?.length ?? 0) > 0 && (
+                    <ul className="mt-2 space-y-2">
+                      {invites.data?.map((inv) => (
+                        <li key={inv.id}>
+                          <div className="flex items-center gap-2">
+                            <code className="min-w-0 flex-1 truncate rounded bg-slate-100 px-2 py-1 text-xs">
+                              {inv.token}
+                            </code>
+                            <button
+                              onClick={() => copyToken(inv)}
+                              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                              title="Copy token"
+                            >
+                              {copied === inv.id ? (
+                                <Check className="h-4 w-4 text-emerald-600" />
+                              ) : (
+                                <Copy className="h-4 w-4" />
+                              )}
+                            </button>
+                            <button
+                              onClick={() => revokeInviteMut.mutate(inv.id)}
+                              className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                              title="Revoke this invite"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                          <p className="mt-0.5 text-xs text-slate-400">
+                            Single-use, expires {new Date(inv.expires_at).toLocaleString()}.
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               )}
@@ -229,7 +274,8 @@ export default function Household() {
                           <tr key={a.account_id} className="border-t border-slate-100">
                             <td className="py-2">
                               {a.name}{" "}
-                              <span className="text-xs text-slate-400">{a.type.replace("_", " ")}</span>
+                              <span className="text-xs text-slate-400">{a.type.replace("_", " ")}</span>{" "}
+                              <Badge tone={SOURCE_TONE[a.source] ?? "slate"}>{a.source}</Badge>
                             </td>
                             <td className="py-2 text-xs text-slate-500">{a.owner_name}</td>
                             <td className="py-2 text-xs text-slate-500 nums">{a.as_of ?? "—"}</td>
@@ -260,15 +306,6 @@ export default function Household() {
         </>
       )}
 
-      {!household.isPending && !household.isError && !h && (
-        <div className="mt-6">
-          <EmptyState
-            icon={<Users className="h-5 w-5" />}
-            title="Everything stays yours"
-            body="A household never merges data. Members see only the balances of accounts you explicitly share, and nothing is ever editable by anyone but you."
-          />
-        </div>
-      )}
     </>
   );
 }

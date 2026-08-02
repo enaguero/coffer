@@ -49,12 +49,13 @@ class HouseholdMember(Base, TimestampMixin):
 
 class HouseholdInvite(Base, TimestampMixin):
     __tablename__ = "household_invites"
+    __table_args__ = (UniqueConstraint("token", name="uq_household_invite_token"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     household_id: Mapped[int] = mapped_column(ForeignKey("households.id", ondelete="CASCADE"), index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     # Single-use, expiring bearer token (secrets.token_urlsafe).
-    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

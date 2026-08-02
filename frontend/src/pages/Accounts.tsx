@@ -27,6 +27,12 @@ export default function Accounts() {
     queryKey: ["accounts"],
     queryFn: async () => (await api.get<Account[]>("/api/v1/accounts")).data,
   });
+  const household = useQuery({
+    queryKey: ["household"],
+    queryFn: async () => (await api.get<{ id: number } | null>("/api/v1/household")).data,
+    staleTime: 60_000,
+  });
+  const hasHousehold = Boolean(household.data);
   const banks = useQuery({
     queryKey: ["banks"],
     queryFn: async () => (await api.get<UkBank[]>("/api/v1/banks")).data,
@@ -233,6 +239,7 @@ export default function Accounts() {
                   <td className="px-5 py-3">
                     <Select
                       value={a.visibility}
+                      disabled={!hasHousehold}
                       onChange={(e) =>
                         setVisibilityMut.mutate({
                           id: a.id,
@@ -240,7 +247,11 @@ export default function Accounts() {
                         })
                       }
                       className="!w-28 !py-1 text-xs"
-                      title="Household-visible accounts appear read-only to your household members"
+                      title={
+                        hasHousehold
+                          ? "Household-visible accounts appear read-only to your household members"
+                          : "Set up a household first (Household page) — nothing is shared until then"
+                      }
                     >
                       <option value="private">Private</option>
                       <option value="household">Household</option>
