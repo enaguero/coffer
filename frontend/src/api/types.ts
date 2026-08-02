@@ -380,7 +380,6 @@ export interface CashflowEntryUpsert {
 export interface ChainBreak {
   prev_as_of: string;
   as_of: string;
-  prev_balance: string;
   attested: string;
   expected: string;
   delta: string;
@@ -395,7 +394,9 @@ export interface AccountIntegrity {
   first_documented: string | null;
   last_documented: string | null;
   missing_months: string[];
+  missing_month_count: number;
   chain_breaks: ChainBreak[];
+  chain_break_count: number;
 }
 
 export interface Integrity {
@@ -416,11 +417,12 @@ export interface ReplayReport {
   account_id: number;
   filename: string;
   status: "ok" | "drift" | "file_missing" | "parse_failed";
+  source: string;
   parsed_rows: number;
   matched: number;
   missing_count: number;
   altered_count: number;
-  unverifiable: number;
+  skipped: number;
   missing_from_ledger: ReplayRowDiff[];
   altered: ReplayRowDiff[];
   error: string | null;

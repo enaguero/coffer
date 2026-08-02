@@ -53,6 +53,14 @@ class StatementImport(Base, TimestampMixin):
     # preview → confirm flow can record a BalanceSnapshot at commit time.
     closing_balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     closing_balance_date: Mapped[date | None] = mapped_column(Date)
+    # The date range the statement documents (min/max parsed row dates) —
+    # coverage must come from the document, not from which rows survived
+    # dedup, or quiet/all-duplicate months read as gaps forever.
+    period_start: Mapped[date | None] = mapped_column(Date)
+    period_end: Mapped[date | None] = mapped_column(Date)
+    # external_ids the user deselected at preview-confirm. Replay treats them
+    # as intentional exclusions, not drift.
+    skipped_external_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     notes: Mapped[str | None] = mapped_column(String(1000))
 
     user: Mapped["User"] = relationship(back_populates="statement_imports")  # noqa: F821
