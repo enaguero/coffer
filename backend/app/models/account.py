@@ -31,6 +31,11 @@ class UkWrapper(StrEnum):
     PENSION = "pension"
 
 
+class AccountVisibility(StrEnum):
+    PRIVATE = "private"
+    HOUSEHOLD = "household"
+
+
 class Account(Base, TimestampMixin):
     __tablename__ = "accounts"
 
@@ -52,6 +57,14 @@ class Account(Base, TimestampMixin):
     )
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     opening_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), nullable=False)
+    # Household-visible accounts appear read-only to the other members of the
+    # owner's household. Reset to PRIVATE whenever the owner joins or leaves a
+    # household — consent never carries between households.
+    visibility: Mapped[AccountVisibility] = mapped_column(
+        Enum(AccountVisibility, name="account_visibility", values_callable=lambda e: [m.value for m in e]),
+        default=AccountVisibility.PRIVATE,
+        nullable=False,
+    )
 
     user: Mapped["User"] = relationship(back_populates="accounts")  # noqa: F821
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account", cascade="all, delete-orphan")  # noqa: F821

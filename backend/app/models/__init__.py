@@ -8,6 +8,7 @@ from app.models.category_rule import CategoryRule
 from app.models.debt import Debt
 from app.models.fx_rate import FxRate
 from app.models.goal import Goal
+from app.models.household import Household, HouseholdInvite, HouseholdMember
 from app.models.import_profile import ImportProfile
 from app.models.statement import StatementImport
 from app.models.transaction import Transaction
@@ -27,6 +28,9 @@ __all__ = [
     "CashflowLine",
     "CashflowEntry",
     "Goal",
+    "Household",
+    "HouseholdInvite",
+    "HouseholdMember",
     "ImportProfile",
     "StatementImport",
 ]

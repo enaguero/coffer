@@ -12,6 +12,7 @@ from app.api.v1 import (
     debts,
     fx,
     goals,
+    household,
     imports,
     insights,
     integrity,
@@ -34,3 +35,4 @@ api_router.include_router(fx.router)
 api_router.include_router(cashflow.router)
 api_router.include_router(insights.router)
 api_router.include_router(integrity.router)
+api_router.include_router(household.router)

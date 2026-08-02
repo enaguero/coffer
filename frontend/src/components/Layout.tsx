@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Target,
   Upload,
+  Users,
   Wallet,
   X,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const navItems = [
   { to: "/networth", label: "Net worth", icon: Scale },
   { to: "/import", label: "Import", icon: Upload },
   { to: "/integrity", label: "Integrity", icon: ShieldCheck },
+  { to: "/household", label: "Household", icon: Users },
 ];
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>

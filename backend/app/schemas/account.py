@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.account import AccountType, UkWrapper
+from app.models.account import AccountType, AccountVisibility, UkWrapper
 from app.services.import_engine.catalog import get_bank
 
 
@@ -27,6 +27,9 @@ class AccountBase(BaseModel):
     uk_wrapper: UkWrapper | None = None
     currency: str = Field(default="USD", pattern=r"^[A-Za-z]{3}$")
     opening_balance: Decimal = Decimal("0")
+    # Household-visible accounts appear read-only to the other members of
+    # the owner's household.
+    visibility: AccountVisibility = AccountVisibility.PRIVATE
 
     _validate_bank_id = field_validator("bank_id")(_check_bank_id)
     _upper_currency = field_validator("currency")(_upper_currency)
@@ -44,6 +47,7 @@ class AccountUpdate(BaseModel):
     uk_wrapper: UkWrapper | None = None
     currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
     opening_balance: Decimal | None = None
+    visibility: AccountVisibility | None = None
 
     _validate_bank_id = field_validator("bank_id")(_check_bank_id)
     _upper_currency = field_validator("currency")(_upper_currency)
