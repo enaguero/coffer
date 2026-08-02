@@ -38,9 +38,21 @@ TEST_DATABASE_URL = os.environ.get(
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
+from app.core.config import settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dirs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every filesystem-touching setting at a per-test tmp dir. The
+    defaults live under /app, which only exists inside the Docker image — on a
+    bare CI runner they'd fail with FileNotFoundError/PermissionError, and even
+    in Docker they'd leak state between tests."""
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(settings, "inbox_dir", str(tmp_path / "inbox"))
+    monkeypatch.setattr(settings, "backup_dir", str(tmp_path / "backups"))
 
 
 def _recreate_test_database() -> None:
