@@ -5,9 +5,26 @@ import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Account, BudgetMonthView, CategoryRule, Goal, StatementImportRecord } from "../api/types";
+import { useAuth } from "../contexts/useAuth";
+import { toNum } from "../lib/format";
 import { Card, ProgressBar } from "./ui";
 
-const DISMISS_KEY = "coffer.getting-started.dismissed";
+// Blocked site data must degrade to "not dismissed", never crash the Dashboard.
+function safeGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Nothing to do — the card will reappear next visit.
+  }
+}
 
 interface Step {
   label: string;
@@ -18,39 +35,50 @@ interface Step {
 
 /** Statement-first onboarding: a checklist driven by the account's real state
  * (not a stored wizard step), so it also self-heals — deleting everything
- * brings it back. Hidden once complete or dismissed. */
+ * brings it back. Hidden once complete or dismissed (per user, this browser). */
 export default function GettingStarted() {
-  const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISS_KEY) === "1");
+  const { user } = useAuth();
+  const dismissKey = `coffer.getting-started.dismissed.${user?.id ?? "anon"}`;
+  const [dismissed, setDismissed] = useState(() => safeGet(dismissKey) === "1");
   const now = new Date();
 
+  const enabled = !dismissed;
   const accounts = useQuery({
     queryKey: ["accounts"],
     queryFn: async () => (await api.get<Account[]>("/api/v1/accounts")).data,
     staleTime: 60_000,
+    enabled,
   });
   const imports = useQuery({
     queryKey: ["imports"],
     queryFn: async () => (await api.get<StatementImportRecord[]>("/api/v1/imports")).data,
     staleTime: 60_000,
+    enabled,
   });
   const rules = useQuery({
     queryKey: ["category-rules"],
     queryFn: async () => (await api.get<CategoryRule[]>("/api/v1/category-rules")).data,
     staleTime: 60_000,
+    enabled,
   });
   const monthView = useQuery({
     queryKey: ["budget-month", now.getFullYear(), now.getMonth() + 1],
     queryFn: async () =>
       (await api.get<BudgetMonthView>(`/api/v1/budgets/month/${now.getFullYear()}/${now.getMonth() + 1}`)).data,
+    enabled,
   });
   const goals = useQuery({
     queryKey: ["goals"],
     queryFn: async () => (await api.get<Goal[]>("/api/v1/goals")).data,
+    enabled,
   });
 
   if (dismissed) return null;
-  // Don't flash the checklist before the data that decides it has arrived.
-  if (accounts.isPending || imports.isPending) return null;
+  // The checklist claims to reflect real state: wait until every input has
+  // arrived (no step-by-step flicker), and never render from errored data.
+  const queries = [accounts, imports, rules, monthView, goals];
+  if (queries.some((q) => q.isError)) return null;
+  if (!queries.every((q) => q.isSuccess)) return null;
 
   const committed = (imports.data ?? []).filter((i) => i.status === "committed");
   const steps: Step[] = [
@@ -76,7 +104,7 @@ export default function GettingStarted() {
       label: "Plan this month's budget",
       detail: "Planned vs actual per category — the monthly heartbeat.",
       to: "/budget",
-      done: (monthView.data?.rows ?? []).some((r) => Number(r.planned) > 0),
+      done: (monthView.data?.rows ?? []).some((r) => toNum(r.planned) > 0),
     },
     {
       label: "Set a goal",
@@ -89,7 +117,7 @@ export default function GettingStarted() {
   if (doneCount === steps.length) return null;
 
   function dismiss() {
-    localStorage.setItem(DISMISS_KEY, "1");
+    safeSet(dismissKey, "1");
     setDismissed(true);
   }
 
