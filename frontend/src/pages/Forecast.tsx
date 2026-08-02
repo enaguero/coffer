@@ -14,9 +14,9 @@ import {
 
 import { api } from "../api/client";
 import type { Forecast as ForecastData, RecurringItem } from "../api/types";
-import { Badge, Card, EmptyState, Input, Label, PageHeader, StatCard } from "../components/ui";
+import { Badge, Card, EmptyState, Input, Label, PageHeader, StatCard, WarningBanner } from "../components/ui";
 import { fmtMoney, fmtMoneySigned, toNum } from "../lib/format";
-import { useUserCurrency } from "../lib/useCurrency";
+import { useAccountCurrencyMap, useUserCurrency } from "../lib/useCurrency";
 
 const CADENCE_LABEL: Record<string, string> = {
   weekly: "wk",
@@ -28,7 +28,8 @@ const CADENCE_LABEL: Record<string, string> = {
 };
 
 export default function Forecast() {
-  const currency = useUserCurrency();
+  const fallbackCurrency = useUserCurrency();
+  const accountCurrency = useAccountCurrencyMap();
   const [reserveInput, setReserveInput] = useState("200");
   const [reserve, setReserve] = useState("200");
 
@@ -43,6 +44,8 @@ export default function Forecast() {
   });
 
   const f = forecast.data;
+  // The response says which currency the projection runs in — prefer it.
+  const currency = f?.display_currency ?? fallbackCurrency;
   const chartData = f?.series.map((p) => ({ on: p.on.slice(5), balance: toNum(p.balance) })) ?? [];
   const upcoming = (f?.events ?? []).slice(0, 15);
 
@@ -66,6 +69,13 @@ export default function Forecast() {
           </label>
         }
       />
+
+      {(f?.excluded_currencies?.length ?? 0) > 0 && (
+        <WarningBanner className="mb-4">
+          Projection covers {f?.display_currency} accounts only — accounts in{" "}
+          {f?.excluded_currencies.join(", ")} are excluded (single-currency forecast).
+        </WarningBanner>
+      )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -187,24 +197,29 @@ export default function Forecast() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recurring.data?.slice(0, 20).map((r, i) => (
-                    <tr key={i} className={`border-t border-slate-100 ${r.active ? "" : "opacity-50"}`}>
-                      <td className="max-w-[180px] truncate py-2" title={r.description}>
-                        {r.description}
-                        {!r.active && <span className="ml-1 text-xs text-slate-400">(lapsed)</span>}
-                      </td>
-                      <td className="py-2">
-                        <Badge tone={r.confidence >= 0.7 ? "emerald" : "slate"}>
-                          {CADENCE_LABEL[r.cadence] ?? r.cadence}
-                        </Badge>
-                      </td>
-                      <td className="py-2 text-right nums">{fmtMoneySigned(r.typical_amount, currency)}</td>
-                      <td className="py-2 text-right nums text-slate-500">
-                        {fmtMoneySigned(r.monthly_equivalent, currency)}
-                      </td>
-                      <td className="py-2 text-right text-xs text-slate-500 nums">{r.next_expected}</td>
-                    </tr>
-                  ))}
+                  {recurring.data?.slice(0, 20).map((r, i) => {
+                    // Recurring items are per-account; format in the account's
+                    // own currency, not the page's display currency.
+                    const rowCurrency = accountCurrency.get(r.account_id) ?? currency;
+                    return (
+                      <tr key={i} className={`border-t border-slate-100 ${r.active ? "" : "opacity-50"}`}>
+                        <td className="max-w-[180px] truncate py-2" title={r.description}>
+                          {r.description}
+                          {!r.active && <span className="ml-1 text-xs text-slate-400">(lapsed)</span>}
+                        </td>
+                        <td className="py-2">
+                          <Badge tone={r.confidence >= 0.7 ? "emerald" : "slate"}>
+                            {CADENCE_LABEL[r.cadence] ?? r.cadence}
+                          </Badge>
+                        </td>
+                        <td className="py-2 text-right nums">{fmtMoneySigned(r.typical_amount, rowCurrency)}</td>
+                        <td className="py-2 text-right nums text-slate-500">
+                          {fmtMoneySigned(r.monthly_equivalent, rowCurrency)}
+                        </td>
+                        <td className="py-2 text-right text-xs text-slate-500 nums">{r.next_expected}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

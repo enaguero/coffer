@@ -183,3 +183,13 @@ export function Badge({
     </span>
   );
 }
+
+export function WarningBanner({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div
+      className={`rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 ${className}`}
+    >
+      {children}
+    </div>
+  );
+}

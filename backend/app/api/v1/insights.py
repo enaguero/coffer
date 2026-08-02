@@ -13,8 +13,9 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession
 from app.core.rate_limit import limiter
-from app.models.account import LIQUID_ACCOUNT_TYPES, Account, UkWrapper
+from app.models.account import Account, UkWrapper
 from app.models.debt import Debt
+from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.insights import (
@@ -28,7 +29,13 @@ from app.schemas.insights import (
     RecurringItemOut,
     SurplusOut,
 )
-from app.services.account_loader import load_account_data, load_txn_lites, sum_positive_inflows
+from app.services.account_loader import (
+    load_account_data,
+    load_forecast_scope,
+    load_txn_lites,
+    resolve_display_currency,
+    sum_positive_inflows,
+)
 from app.services.analytics.allowances import compute_allowances, tax_year_bounds
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
@@ -38,6 +45,12 @@ from app.services.analytics.surplus import latest_complete_month, rank_allocatio
 from app.services.digest import compose_digest, send_email
 
 router = APIRouter(prefix="/insights", tags=["insights"])
+
+
+def _fx_rates(db, user_id: int) -> dict:
+    return {
+        r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))
+    }
 
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
@@ -60,14 +73,26 @@ def forecast(
     days: int = Query(default=60, ge=7, le=365),
     reserve: Decimal = Query(default=Decimal("0"), ge=0),
 ) -> ForecastOut:
-    items = detect_recurring(load_txn_lites(db, current.id))
-    account_data = load_account_data(db, current.id)
-    start = sum(
-        (current_balance(a).balance for a in account_data if a.type in LIQUID_ACCOUNT_TYPES),
-        Decimal("0"),
-    )
+    # The projection is a single running balance, so it must be single-currency:
+    # only display-currency liquid accounts feed it (shared with the digest via
+    # load_forecast_scope). Recurring items come from those same accounts —
+    # card-ledger charges reach the liquid balance through the card *payment*,
+    # so including them directly would double-count when the payment is also
+    # detected as recurring.
+    account_data, display, in_display, excluded_currencies = load_forecast_scope(db, current)
+    included_ids = {a.id for a in in_display}
+    items = detect_recurring(load_txn_lites(db, current.id, account_ids=included_ids))
+    start = sum((current_balance(a).balance for a in in_display), Decimal("0"))
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
-    due_days = [(d.name, d.due_day_of_month, d.minimum_payment) for d in debts if d.due_day_of_month is not None]
+    # Due markers share the calendar with display-currency amounts; debts tied
+    # to a foreign-currency account would render their minimums mislabeled.
+    currency_of = {a.id: a.currency for a in account_data}
+    due_days = [
+        (d.name, d.due_day_of_month, d.minimum_payment)
+        for d in debts
+        if d.due_day_of_month is not None
+        and (display is None or d.account_id is None or currency_of.get(d.account_id, display) == display)
+    ]
     result = project(start, items, days=days, reserve=reserve, debt_due_days=due_days)
     return ForecastOut(
         start_balance=result.start_balance,
@@ -81,6 +106,8 @@ def forecast(
         first_below_reserve=result.first_below_reserve,
         first_below_zero=result.first_below_zero,
         safe_to_commit=result.safe_to_commit,
+        display_currency=display,
+        excluded_currencies=excluded_currencies,
     )
 
 
@@ -96,6 +123,8 @@ def networth(
         account_data,
         [(d.id, d.name, d.current_balance, d.account_id) for d in debts],
         months=months,
+        display_currency=resolve_display_currency(current, account_data),
+        rates=_fx_rates(db, current.id),
     )
     return NetWorthOut(
         accounts=[asdict(b) for b in report.accounts],
@@ -104,6 +133,8 @@ def networth(
         liabilities=report.liabilities,
         net=report.net,
         series=[asdict(p) for p in report.series],
+        display_currency=report.display_currency,
+        excluded_currencies=report.excluded_currencies,
     )
 
 
@@ -185,12 +216,18 @@ def surplus(
     month: int | None = Query(default=None, ge=1, le=12),
     amount: Decimal | None = Query(default=None, gt=0),
 ) -> SurplusOut:
-    txns = db.execute(
-        select(Transaction.posted_on, Transaction.amount, Transaction.category_id).where(
-            Transaction.user_id == current.id
-        )
-    ).all()
-    txn_tuples = [(p, a, c) for p, a, c in txns]
+    # Cash surplus is a single-currency figure: only display-currency accounts'
+    # transactions feed it — raw amounts across currencies don't add.
+    account_data = load_account_data(db, current.id)
+    display = resolve_display_currency(current, account_data)
+    display_ids = {a.id for a in account_data if display is None or a.currency == display}
+    currency_of = {a.id: a.currency for a in account_data}
+    txn_q = select(Transaction.posted_on, Transaction.amount, Transaction.category_id).where(
+        Transaction.user_id == current.id
+    )
+    if display is not None:
+        txn_q = txn_q.where(Transaction.account_id.in_(display_ids))
+    txn_tuples = [(p, a, c) for p, a, c in db.execute(txn_q).all()]
 
     if year is None or month is None:
         # The latest complete month with data; fall back to the latest month
@@ -224,6 +261,8 @@ def surplus(
 
     # For goals funded by a linked account, the live derived balance is the
     # real "current" — the stored current_amount goes stale while auto-tracked.
+    # Goals linked to a non-display-currency account are left out: their
+    # balance is in different units and "months earlier" math would be fiction.
     linked_ids = {g.account_id for g in goals if g.account_id is not None}
     linked_balances = {acc.id: current_balance(acc).balance for acc in load_account_data(db, current.id, linked_ids)}
     goal_tuples = [
@@ -235,11 +274,12 @@ def surplus(
             g.target_date,
         )
         for g in goals
+        if g.account_id is None or display is None or currency_of.get(g.account_id, display) == display
     ]
 
     options = rank_allocations(considered, _debt_inputs(db, current.id), goal_tuples, floor) if considered > 0 else []
 
-    items = detect_recurring(load_txn_lites(db, current.id))
+    items = detect_recurring(load_txn_lites(db, current.id, account_ids=display_ids if display else None))
     raises = detect_raises(items)
 
     return SurplusOut(

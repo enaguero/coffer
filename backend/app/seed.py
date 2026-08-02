@@ -30,6 +30,7 @@ from app.models.account import Account, AccountType
 from app.models.budget import BudgetEntry
 from app.models.category import Category, CategoryKind
 from app.models.debt import Debt
+from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.models.user import User
@@ -90,9 +91,13 @@ def seed(db: Session) -> None:
         email=DEMO_EMAIL,
         full_name=DEMO_NAME,
         hashed_password=hash_password(DEMO_PASSWORD),
+        display_currency="GBP",
     )
     db.add(user)
     db.flush()
+
+    # Manual FX: 1 CLP in GBP (demo rate — the user maintains this).
+    db.add(FxRate(user_id=user.id, currency="CLP", rate=Decimal("0.00082"), as_of=today))
 
     # ---- Operating accounts
     checking = Account(
@@ -100,7 +105,7 @@ def seed(db: Session) -> None:
         name="Lloyds Checking",
         type=AccountType.CHECKING,
         institution="Lloyds",
-        currency="USD",
+        currency="GBP",
         opening_balance=Decimal("1200"),
     )
     savings = Account(
@@ -108,10 +113,21 @@ def seed(db: Session) -> None:
         name="Lloyds Savings",
         type=AccountType.SAVINGS,
         institution="Lloyds",
-        currency="USD",
+        currency="GBP",
         opening_balance=Decimal("2000"),
     )
-    db.add_all([checking, savings])
+    # A genuinely foreign-currency account: 1,000,000 CLP ≈ £820 at the demo
+    # rate. It exercises conversion on Net Worth and exclusion on the
+    # (single-currency, GBP) forecast.
+    clp_savings = Account(
+        user_id=user.id,
+        name="Banco de Chile Ahorro",
+        type=AccountType.SAVINGS,
+        institution="Banco de Chile",
+        currency="CLP",
+        opening_balance=Decimal("1000000"),
+    )
+    db.add_all([checking, savings, clp_savings])
     db.flush()
 
     # ---- Debt accounts + Debt records + debt-payment categories
@@ -138,7 +154,11 @@ def seed(db: Session) -> None:
             name=dname,
             type=dtype,
             institution=dname.split()[0],
-            currency="USD",
+            # All debt figures (balances, minimums, budget lines, payments from
+            # GBP checking) are one coherent unit — the register has no
+            # currency column, so foreign-denominated debts would contradict
+            # the planner. Multi-currency is demoed by the CLP savings account.
+            currency="GBP",
             opening_balance=-balance,
         )
         db.add(acct)

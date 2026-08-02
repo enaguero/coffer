@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.account import AccountType
 
@@ -43,6 +43,9 @@ class DueMarkerOut(BaseModel):
 
 
 class ForecastOut(BaseModel):
+    display_currency: str | None = None
+    # Liquid-account currencies excluded from the projection (no conversion).
+    excluded_currencies: list[str] = Field(default_factory=list)
     start_balance: Decimal
     reserve: Decimal
     days: int
@@ -61,10 +64,11 @@ class AccountBalanceOut(BaseModel):
     name: str
     type: AccountType
     currency: str
-    balance: Decimal
+    balance: Decimal  # in the account's own currency
     as_of: date | None
     source: str
     drift: Decimal | None
+    converted: bool = True
 
 
 class RegisterDebtOut(BaseModel):
@@ -81,6 +85,8 @@ class NetWorthPointOut(BaseModel):
 
 
 class NetWorthOut(BaseModel):
+    display_currency: str | None = None
+    excluded_currencies: list[str] = Field(default_factory=list)
     accounts: list[AccountBalanceOut]
     register_debts: list[RegisterDebtOut]
     assets: Decimal

@@ -5,6 +5,7 @@ from sqlalchemy import extract, func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.deps import CurrentUser, DbSession
+from app.models.account import Account
 from app.models.budget import BudgetEntry
 from app.models.category import Category, CategoryKind
 from app.models.transaction import Transaction
@@ -15,6 +16,7 @@ from app.schemas.budget import (
     BudgetMonthCell,
     BudgetMonthView,
 )
+from app.services.account_loader import load_account_data, resolve_display_currency
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
@@ -88,7 +90,10 @@ def month_view(year: int, month: int, current: CurrentUser, db: DbSession) -> Bu
             )
         )
     }
-    actual_rows = db.execute(
+    # Budget amounts are display-currency figures; actuals only add up in the
+    # same units, so transactions on other-currency accounts stay out.
+    display = resolve_display_currency(current, load_account_data(db, current.id))
+    actual_q = (
         select(
             Transaction.category_id,
             func.coalesce(func.sum(Transaction.amount), 0),
@@ -99,7 +104,14 @@ def month_view(year: int, month: int, current: CurrentUser, db: DbSession) -> Bu
             extract("month", Transaction.posted_on) == month,
         )
         .group_by(Transaction.category_id)
-    ).all()
+    )
+    if display is not None:
+        actual_q = actual_q.where(
+            Transaction.account_id.in_(
+                select(Account.id).where(Account.user_id == current.id, func.upper(Account.currency) == display)
+            )
+        )
+    actual_rows = db.execute(actual_q).all()
     actual_map: dict[int | None, Decimal] = {cat_id: Decimal(total or 0) for cat_id, total in actual_rows}
 
     rows: list[BudgetMonthCell] = []

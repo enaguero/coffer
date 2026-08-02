@@ -9,6 +9,7 @@ export interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string, fullName?: string) => Promise<void>;
   logout: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -25,6 +26,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
+  async function refresh() {
+    const me = await api.get<User>("/api/v1/auth/me");
+    setUser(me.data);
+  }
+
   async function login(email: string, password: string) {
     const form = new URLSearchParams();
     form.append("username", email);
@@ -32,8 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await api.post("/api/v1/auth/login", form, {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
-    const me = await api.get<User>("/api/v1/auth/me");
-    setUser(me.data);
+    await refresh();
   }
 
   async function signup(email: string, password: string, fullName?: string) {
@@ -42,8 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       password,
       full_name: fullName,
     });
-    const me = await api.get<User>("/api/v1/auth/me");
-    setUser(me.data);
+    await refresh();
   }
 
   async function logout() {
@@ -55,7 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, signup, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, signup, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );

@@ -13,6 +13,13 @@ export interface User {
   id: number;
   email: string;
   full_name: string | null;
+  display_currency: string | null;
+}
+
+export interface FxRate {
+  currency: string;
+  rate: string;
+  as_of: string | null;
 }
 
 export type UkWrapper = "isa" | "lisa" | "pension";
@@ -176,6 +183,8 @@ export interface ForecastEvent {
 }
 
 export interface Forecast {
+  display_currency: string | null;
+  excluded_currencies: string[];
   start_balance: string;
   reserve: string;
   days: number;
@@ -194,13 +203,16 @@ export interface AccountBalanceInfo {
   name: string;
   type: AccountType;
   currency: string;
-  balance: string;
+  balance: string; // in the account's own currency
   as_of: string | null;
   source: string;
   drift: string | null;
+  converted: boolean;
 }
 
 export interface NetWorth {
+  display_currency: string | null;
+  excluded_currencies: string[];
   accounts: AccountBalanceInfo[];
   register_debts: Array<{ id: number; name: string; balance: string }>;
   assets: string;

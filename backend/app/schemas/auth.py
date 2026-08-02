@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class SignupRequest(BaseModel):
@@ -21,5 +21,16 @@ class UserOut(BaseModel):
     id: int
     email: EmailStr
     full_name: str | None = None
+    display_currency: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class UserSettingsUpdate(BaseModel):
+    # Explicit null clears the setting (back to the most-common fallback).
+    display_currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
+
+    @field_validator("display_currency")
+    @classmethod
+    def _upper(cls, v: str | None) -> str | None:
+        return v.upper() if v is not None else None

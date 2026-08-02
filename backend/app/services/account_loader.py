@@ -16,16 +16,19 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.account import Account
+from app.models.account import LIQUID_ACCOUNT_TYPES, Account
 from app.models.balance_snapshot import BalanceSnapshot
 from app.models.transaction import Transaction
+from app.models.user import User
+from app.services.analytics.fx import most_common_currency
 from app.services.analytics.net_worth import AccountData
 from app.services.analytics.recurring import TxnLite
 
 
-def load_txn_lites(db: Session, user_id: int) -> list[TxnLite]:
-    """Every transaction as the lightweight shape recurring-detection wants."""
-    rows = db.execute(
+def load_txn_lites(db: Session, user_id: int, account_ids: Iterable[int] | None = None) -> list[TxnLite]:
+    """Every transaction as the lightweight shape recurring-detection wants.
+    Pass `account_ids` to filter in SQL instead of discarding rows in Python."""
+    query = (
         select(
             Transaction.account_id,
             Transaction.posted_on,
@@ -35,8 +38,39 @@ def load_txn_lites(db: Session, user_id: int) -> list[TxnLite]:
         )
         .where(Transaction.user_id == user_id)
         .order_by(Transaction.posted_on)
-    ).all()
-    return [TxnLite(*row) for row in rows]
+    )
+    if account_ids is not None:
+        ids = set(account_ids)
+        if not ids:
+            return []
+        query = query.where(Transaction.account_id.in_(ids))
+    return [TxnLite(*row) for row in db.execute(query).all()]
+
+
+def resolve_display_currency(user: User, accounts: list[AccountData]) -> str | None:
+    """The user's setting, else the most common currency among liquid accounts
+    (they carry the cashflow), else among all accounts, else None. Liquid-first
+    keeps a portfolio dominated by foreign debt/valuation accounts from electing
+    a currency the forecast has no liquid accounts in."""
+    if user.display_currency:
+        return user.display_currency.upper()
+    liquid = [a.currency for a in accounts if a.type in LIQUID_ACCOUNT_TYPES]
+    return most_common_currency(liquid) or most_common_currency([a.currency for a in accounts])
+
+
+def load_forecast_scope(
+    db: Session, user: User
+) -> tuple[list[AccountData], str | None, list[AccountData], list[str]]:
+    """The single-currency forecast's inputs, shared by /insights/forecast and
+    the weekly digest so the two projections can never disagree: (all accounts,
+    display currency, the liquid display-currency accounts that feed the
+    projection, the liquid currencies excluded from it)."""
+    accounts = load_account_data(db, user.id)
+    display = resolve_display_currency(user, accounts)
+    liquid = [a for a in accounts if a.type in LIQUID_ACCOUNT_TYPES]
+    in_display = [a for a in liquid if display is None or a.currency == display]
+    excluded = sorted({a.currency for a in liquid if display is not None and a.currency != display})
+    return accounts, display, in_display, excluded
 
 
 def sum_positive_inflows(
@@ -111,7 +145,9 @@ def load_account_data(db: Session, user_id: int, account_ids: Iterable[int] | No
             id=a.id,
             name=a.name,
             type=a.type,
-            currency=a.currency,
+            # Normalized so currency comparisons (convert, display filters)
+            # can't be defeated by a legacy lowercase code.
+            currency=a.currency.upper(),
             opening_balance=a.opening_balance,
             txns=txns_by_account.get(a.id, []),
             snapshots=snaps_by_account.get(a.id, []),

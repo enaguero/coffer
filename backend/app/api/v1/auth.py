@@ -2,14 +2,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.cookies import clear_session_cookie, set_session_cookie
 from app.core.deps import CurrentUser, DbSession
 from app.core.rate_limit import limiter
 from app.core.security import create_access_token, hash_password, verify_password
+from app.models.fx_rate import FxRate
 from app.models.user import User
-from app.schemas.auth import SignupRequest, TokenResponse, UserOut
+from app.schemas.auth import SignupRequest, TokenResponse, UserOut, UserSettingsUpdate
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -63,4 +64,19 @@ def logout(response: Response) -> None:
 
 @router.get("/me", response_model=UserOut)
 def me(current: CurrentUser) -> User:
+    return current
+
+
+@router.patch("/me", response_model=UserOut)
+def update_me(payload: UserSettingsUpdate, current: CurrentUser, db: DbSession) -> User:
+    data = payload.model_dump(exclude_unset=True)
+    if "display_currency" in data and data["display_currency"] != current.display_currency:
+        # Saved rates mean "1 unit = X of the OLD display currency" — reusing
+        # them against a new target would silently corrupt every converted
+        # total, so a display change wipes them (the UI says so).
+        db.execute(delete(FxRate).where(FxRate.user_id == current.id))
+    for key, value in data.items():
+        setattr(current, key, value)
+    db.commit()
+    db.refresh(current)
     return current
