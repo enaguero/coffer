@@ -11,6 +11,9 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     full_name: Mapped[str | None] = mapped_column(String(255))
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Currency all cross-account aggregates are displayed in. NULL = fall back
+    # to the most-common currency across the user's accounts.
+    display_currency: Mapped[str | None] = mapped_column(String(3))
 
     accounts: Mapped[list["Account"]] = relationship(back_populates="user", cascade="all, delete-orphan")  # noqa: F821
     categories: Mapped[list["Category"]] = relationship(back_populates="user", cascade="all, delete-orphan")  # noqa: F821

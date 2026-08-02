@@ -6,6 +6,7 @@ from app.models.cashflow import CashflowEntry, CashflowLine
 from app.models.category import Category
 from app.models.category_rule import CategoryRule
 from app.models.debt import Debt
+from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.import_profile import ImportProfile
 from app.models.statement import StatementImport
@@ -21,6 +22,7 @@ __all__ = [
     "CategoryRule",
     "Transaction",
     "Debt",
+    "FxRate",
     "BudgetEntry",
     "CashflowLine",
     "CashflowEntry",

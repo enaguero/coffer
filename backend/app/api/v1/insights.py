@@ -15,6 +15,7 @@ from app.core.deps import CurrentUser, DbSession
 from app.core.rate_limit import limiter
 from app.models.account import LIQUID_ACCOUNT_TYPES, Account, UkWrapper
 from app.models.debt import Debt
+from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.insights import (
@@ -40,6 +41,23 @@ from app.services.digest import compose_digest, send_email
 router = APIRouter(prefix="/insights", tags=["insights"])
 
 
+def _fx_rates(db, user_id: int) -> dict:
+    return {
+        r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))
+    }
+
+
+def _display_currency(current, account_data) -> str | None:
+    """The user's setting, else the most common account currency (mirrors the
+    frontend's long-standing fallback), else None (no accounts yet)."""
+    if current.display_currency:
+        return current.display_currency
+    counts: dict[str, int] = {}
+    for a in account_data:
+        counts[a.currency] = counts.get(a.currency, 0) + 1
+    return max(counts, key=lambda c: counts[c]) if counts else None
+
+
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
     debts = db.scalars(select(Debt).where(Debt.user_id == user_id)).all()
     return [DebtInput.from_model(d) for d in debts]
@@ -60,12 +78,17 @@ def forecast(
     days: int = Query(default=60, ge=7, le=365),
     reserve: Decimal = Query(default=Decimal("0"), ge=0),
 ) -> ForecastOut:
-    items = detect_recurring(load_txn_lites(db, current.id))
     account_data = load_account_data(db, current.id)
-    start = sum(
-        (current_balance(a).balance for a in account_data if a.type in LIQUID_ACCOUNT_TYPES),
-        Decimal("0"),
-    )
+    display = _display_currency(current, account_data)
+    # The projection is a single running balance, so it must be single-currency:
+    # only display-currency liquid accounts feed it. FX conversion would also
+    # require converting every recurring amount — excluded honestly instead.
+    liquid = [a for a in account_data if a.type in LIQUID_ACCOUNT_TYPES]
+    in_display = [a for a in liquid if display is None or a.currency == display]
+    excluded_currencies = sorted({a.currency for a in liquid} - ({display} if display else set()))
+    included_ids = {a.id for a in in_display}
+    items = detect_recurring([t for t in load_txn_lites(db, current.id) if t.account_id in included_ids])
+    start = sum((current_balance(a).balance for a in in_display), Decimal("0"))
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
     due_days = [(d.name, d.due_day_of_month, d.minimum_payment) for d in debts if d.due_day_of_month is not None]
     result = project(start, items, days=days, reserve=reserve, debt_due_days=due_days)
@@ -81,6 +104,8 @@ def forecast(
         first_below_reserve=result.first_below_reserve,
         first_below_zero=result.first_below_zero,
         safe_to_commit=result.safe_to_commit,
+        display_currency=display,
+        excluded_currencies=excluded_currencies,
     )
 
 
@@ -96,6 +121,8 @@ def networth(
         account_data,
         [(d.id, d.name, d.current_balance, d.account_id) for d in debts],
         months=months,
+        display_currency=_display_currency(current, account_data),
+        rates=_fx_rates(db, current.id),
     )
     return NetWorthOut(
         accounts=[asdict(b) for b in report.accounts],
@@ -104,6 +131,8 @@ def networth(
         liabilities=report.liabilities,
         net=report.net,
         series=[asdict(p) for p in report.series],
+        display_currency=report.display_currency,
+        excluded_currencies=report.excluded_currencies,
     )
 
 

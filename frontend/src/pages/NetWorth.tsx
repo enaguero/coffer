@@ -12,8 +12,9 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { Account, Allowances, NetWorth as NetWorthData } from "../api/types";
+import type { Account, Allowances, FxRate, NetWorth as NetWorthData } from "../api/types";
 import { Badge, Button, Card, Input, Label, PageHeader, ProgressBar, Select, StatCard } from "../components/ui";
+import { useAuth } from "../contexts/useAuth";
 import { fmtMoney, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
 
@@ -33,6 +34,36 @@ const SOURCE_TONE: Record<string, "emerald" | "sky" | "slate"> = {
 export default function NetWorth() {
   const qc = useQueryClient();
   const currency = useUserCurrency();
+  const { user, refresh } = useAuth();
+  const fxRates = useQuery({
+    queryKey: ["fx"],
+    queryFn: async () => (await api.get<FxRate[]>("/api/v1/fx")).data,
+  });
+  const [newFxCurrency, setNewFxCurrency] = useState("");
+  const [newFxRate, setNewFxRate] = useState("");
+  const saveRate = useMutation({
+    mutationFn: async (vars: { currency: string; rate: number }) =>
+      api.put("/api/v1/fx", [{ currency: vars.currency, rate: vars.rate }]),
+    onSuccess: () => {
+      setNewFxCurrency("");
+      setNewFxRate("");
+      for (const key of ["fx", "networth", "forecast"]) qc.invalidateQueries({ queryKey: [key] });
+    },
+  });
+  const deleteRate = useMutation({
+    mutationFn: async (currency: string) => api.delete(`/api/v1/fx/${currency}`),
+    onSuccess: () => {
+      for (const key of ["fx", "networth", "forecast"]) qc.invalidateQueries({ queryKey: [key] });
+    },
+  });
+  const setDisplayCurrency = useMutation({
+    mutationFn: async (display_currency: string) =>
+      api.patch("/api/v1/auth/me", { display_currency }),
+    onSuccess: async () => {
+      await refresh?.();
+      for (const key of ["networth", "forecast", "accounts"]) qc.invalidateQueries({ queryKey: [key] });
+    },
+  });
   const networth = useQuery({
     queryKey: ["networth"],
     queryFn: async () => (await api.get<NetWorthData>("/api/v1/insights/networth")).data,
@@ -82,8 +113,17 @@ export default function NetWorth() {
     <>
       <PageHeader
         title="Net worth"
-        subtitle="Everything you own minus everything you owe — built from statement balances and valuations."
+        subtitle={`Everything you own minus everything you owe${
+          nw?.display_currency ? ` — shown in ${nw.display_currency}, converted at your saved rates` : ""
+        }.`}
       />
+
+      {(nw?.excluded_currencies.length ?? 0) > 0 && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Accounts in {nw?.excluded_currencies.join(", ")} are <strong>excluded from the totals</strong> —
+          no exchange rate saved. Add rates below to include them.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <StatCard
@@ -214,8 +254,8 @@ export default function NetWorth() {
                 {nw?.accounts.map((a) => (
                   <tr key={a.id} className="border-t border-slate-100">
                     <td className="py-2">
-                      {a.name}{" "}
-                      <Badge tone={SOURCE_TONE[a.source] ?? "slate"}>{a.source}</Badge>
+                      {a.name} <Badge tone={SOURCE_TONE[a.source] ?? "slate"}>{a.source}</Badge>
+                      {!a.converted && <Badge tone="amber">no rate — excluded</Badge>}
                     </td>
                     <td className="py-2 text-xs text-slate-500 nums">{a.as_of ?? "—"}</td>
                     <td
@@ -278,6 +318,68 @@ export default function NetWorth() {
               Save valuation
             </Button>
           </form>
+
+          <div className="mt-6 border-t border-slate-200 pt-4">
+            <h2 className="text-sm font-semibold text-slate-900">Currency</h2>
+            <label className="mt-2 block">
+              <Label>Display currency (all totals shown in this)</Label>
+              <Input
+                defaultValue={user?.display_currency ?? currency}
+                maxLength={3}
+                onBlur={(e) => {
+                  const v = e.target.value.toUpperCase();
+                  if (v.length === 3 && v !== (user?.display_currency ?? "")) {
+                    setDisplayCurrency.mutate(v);
+                  }
+                }}
+                className="!w-24 uppercase"
+              />
+            </label>
+            <div className="mt-3">
+              <Label>Exchange rates (1 unit = X {user?.display_currency ?? currency})</Label>
+              <ul className="mt-1 space-y-1">
+                {fxRates.data?.map((r) => (
+                  <li key={r.currency} className="flex items-center gap-2 text-sm">
+                    <span className="w-10 font-mono">{r.currency}</span>
+                    <span className="nums flex-1">{r.rate}</span>
+                    <button
+                      onClick={() => deleteRate.mutate(r.currency)}
+                      className="text-xs text-slate-400 hover:text-rose-600"
+                    >
+                      remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  placeholder="CLP"
+                  value={newFxCurrency}
+                  onChange={(e) => setNewFxCurrency(e.target.value.toUpperCase())}
+                  maxLength={3}
+                  className="!w-20 uppercase"
+                />
+                <Input
+                  placeholder="0.00082"
+                  value={newFxRate}
+                  onChange={(e) => setNewFxRate(e.target.value)}
+                  className="!w-32"
+                />
+                <Button
+                  className="!py-1.5"
+                  disabled={newFxCurrency.length !== 3 || !parseFloat(newFxRate) || saveRate.isPending}
+                  onClick={() =>
+                    saveRate.mutate({ currency: newFxCurrency, rate: parseFloat(newFxRate) })
+                  }
+                >
+                  Save rate
+                </Button>
+              </div>
+              <p className="mt-2 text-xs text-slate-400">
+                Rates are manual — no external API. Changing display currency means re-entering rates.
+              </p>
+            </div>
+          </div>
         </Card>
       </div>
     </>

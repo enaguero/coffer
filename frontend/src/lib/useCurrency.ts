@@ -2,21 +2,21 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api/client";
 import type { Account } from "../api/types";
+import { useAuth } from "../contexts/useAuth";
 
 /**
- * Derive a display currency without a user-level setting.
- *
- * Picks the most common currency across the user's accounts, falling back to
- * USD if there are none yet. This is a stop-gap until we add a real
- * user.preferred_currency column — but it correctly honors the data already on
- * each Account, so dashboards stop assuming dollars when the user holds GBP.
+ * The user's display currency: their explicit setting when present, else the
+ * most common currency across their accounts (matching the backend's
+ * _display_currency fallback), else USD.
  */
 export function useUserCurrency(): string {
+  const { user } = useAuth();
   const { data } = useQuery({
     queryKey: ["accounts"],
     queryFn: async () => (await api.get<Account[]>("/api/v1/accounts")).data,
     staleTime: 60_000,
   });
+  if (user?.display_currency) return user.display_currency;
   if (!data || data.length === 0) return "USD";
   const counts: Record<string, number> = {};
   for (const a of data) counts[a.currency] = (counts[a.currency] ?? 0) + 1;

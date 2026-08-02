@@ -21,5 +21,10 @@ class UserOut(BaseModel):
     id: int
     email: EmailStr
     full_name: str | None = None
+    display_currency: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class UserSettingsUpdate(BaseModel):
+    display_currency: str | None = Field(default=None, min_length=3, max_length=3)

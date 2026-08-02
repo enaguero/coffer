@@ -10,6 +10,7 @@ from app.api.v1 import (
     categories,
     category_rules,
     debts,
+    fx,
     goals,
     imports,
     insights,
@@ -28,5 +29,6 @@ api_router.include_router(goals.router)
 api_router.include_router(imports.router)
 api_router.include_router(banks.router)
 api_router.include_router(backup.router)
+api_router.include_router(fx.router)
 api_router.include_router(cashflow.router)
 api_router.include_router(insights.router)

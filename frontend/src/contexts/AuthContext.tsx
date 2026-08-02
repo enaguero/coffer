@@ -9,6 +9,7 @@ export interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string, fullName?: string) => Promise<void>;
   logout: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -54,8 +55,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  async function refresh() {
+    const me = await api.get<User>("/api/v1/auth/me");
+    setUser(me.data);
+  }
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, signup, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, signup, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );
