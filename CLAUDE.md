@@ -68,12 +68,14 @@ FastAPI + SQLAlchemy 2 (declarative `Mapped[...]`) + Alembic, Python 3.12 manage
 - `seed.py` — `python -m app.seed` (`--reset` wipes first). The demo user's debt minimums sum to exactly 40% of $5,000 salary; preserve that invariant.
 
 ### Statement import flow (`api/v1/imports.py`)
-Accepted uploads: `.csv`, `.ofx`/`.qfx`, `.qif`, `.pdf`. Two flows live side-by-side:
+Accepted uploads: `.csv`, `.ofx`/`.qfx`, `.qif`, `.pdf`. Three entry surfaces:
 
 - **Quick (`POST /imports/upload`)** — parse + dedup + auto-categorize + commit in one request. Used by the legacy/simple path.
 - **Preview-then-commit** — `POST /imports/preview` parses, stores rows as JSONB on the `StatementImport` row with `status="preview"`, returns the rows annotated with `suggested_category_id` and `is_duplicate`, plus how the file was parsed (`source`, `warnings`) and — when the heuristic sniffer ran — an `inferred_config` the client can save as the account's import profile. The user reviews in the UI, then `POST /imports/{id}/confirm` commits the selected subset (with optional per-row category overrides). `DELETE /imports/{id}` discards a preview.
 
-In both flows, the file is parsed **before** being written to disk so a parse failure can't leave an orphan upload, and inserted transactions are deduped by `external_id` per-account (bank-native ids — OFX `FITID`, Monzo `Transaction ID` — when available, the synthesized key otherwise).
+- **Statement inbox** — files wait in `<INBOX_DIR>/<user_id>/pending/` until reviewed. They arrive via `POST /imports/inbox` (the PWA share-sheet: the service worker in `frontend/public/sw.js` parks shared files in the Cache API and the Import page drains them with the real session) or dropped directly into the host-bind-mounted `./inbox/` folder (Syncthing/NAS — the listing reads the directory live, no daemon). Previewing an inbox file feeds the normal preview→confirm pipeline and archives it to `processed/` (pruned to the last 20; `uploads/` keeps the canonical copy).
+
+In the upload flows, the file is parsed **before** being written to disk so a parse failure can't leave an orphan upload, and inserted transactions are deduped by `external_id` per-account (bank-native ids — OFX `FITID`, Monzo `Transaction ID` — when available, the synthesized key otherwise).
 
 Import profiles are one-per-account (`models/import_profile.py`, JSONB config) managed via `GET/PUT/DELETE /accounts/{id}/import-profile`. The UK bank list for the account picker is served by `GET /api/v1/banks` from `services/import_engine/catalog.py`; `accounts.bank_id` stores the chosen catalog slug and drives preset selection on import.
 
@@ -99,6 +101,7 @@ API base URL comes from `VITE_API_URL` (defaults to `http://localhost:8000` in d
 - `COFFER_ENV` — `dev` / `test` to relax JWT-secret and rate-limit guards. Anything else is production.
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS` — weekly digest email delivery; empty `SMTP_HOST` disables sending (the in-app preview still works). **These must also be passed through `docker-compose.yml`'s backend `environment:` block — the container does not read the root `.env` directly.**
 - `BACKUP_DIR` (default `/app/backups`, a named volume), `BACKUP_KEEP` (archive generations to retain) — also passed through the compose `environment:` block.
+- `INBOX_DIR` (default `/app/inbox`, bind-mounted to `./inbox` on the host so sync tools can reach it) — statement inbox location.
 
 **Backups (Coffer Archive)**: the compose start command runs `python -m app.prestart`, which snapshots a `pre-upgrade` archive whenever pending migrations are detected on a non-empty DB, then migrates. The archive is a zip of per-table JSONL (readable without Coffer) + the original statement files + a checksummed manifest; a bare `pg_dump` misses the statement files. `python -m app.backup create|verify|restore|list` — `verify` is a real restore drill into a scratch database (schedule `create && verify` with weekly host cron). Restore refuses alembic-revision mismatches without `--force`. `GET /backup/export` is the per-user portability zip; instance restore is CLI-only.
 

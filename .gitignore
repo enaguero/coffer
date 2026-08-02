@@ -31,3 +31,6 @@ backend/uploads/
 
 # Coffer Archive output (operator backups — never commit)
 backend/backups/
+
+# Statement inbox (host-visible watch folder — user data, never commit)
+/inbox/

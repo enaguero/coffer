@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440
     cors_origins: str = "http://localhost:5173"
     upload_dir: str = "/app/uploads"
+    # Statement inbox: files land here (share-sheet uploads or a watch folder
+    # synced via Syncthing/NAS) as /<user_id>/pending/... and wait for review.
+    inbox_dir: str = "/app/inbox"
     # Coffer Archive output dir (mounted volume) and how many generations to keep.
     backup_dir: str = "/app/backups"
     backup_keep: int = 5

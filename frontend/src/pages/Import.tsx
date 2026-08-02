@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, FileUp, Upload, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { CheckCircle2, FileUp, Inbox, Trash2, Upload, X } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { api } from "../api/client";
 import type { Account, Category, ImportProfileConfig, UkBank } from "../api/types";
@@ -35,6 +35,54 @@ interface RowChoice {
   category_id: number | null;
 }
 
+interface InboxFile {
+  filename: string;
+  size: number;
+  modified_at: string;
+}
+
+const SHARE_CACHE = "coffer-shared-files";
+
+let drainInFlight = false;
+
+/** Files parked by the service worker's share-target handler → inbox API. */
+async function drainSharedFiles(): Promise<number> {
+  if (!("caches" in window) || drainInFlight) return 0;
+  drainInFlight = true;
+  let uploaded = 0;
+  try {
+    const cache = await caches.open(SHARE_CACHE);
+    const keys = await cache.keys();
+    for (const key of keys) {
+      const resp = await cache.match(key);
+      if (!resp) continue;
+      const blob = await resp.blob();
+      const raw = resp.headers.get("X-Filename");
+      const name = raw ? decodeURIComponent(raw) : "shared-statement.csv";
+      const fd = new FormData();
+      fd.append("file", new File([blob], name));
+      try {
+        await api.post("/api/v1/imports/inbox", fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        await cache.delete(key);
+        uploaded += 1;
+      } catch (err) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status && status >= 400 && status < 500) {
+          // Deterministic rejection (bad type, too large) — retrying forever
+          // would make an invisible zombie. Drop it.
+          await cache.delete(key);
+        }
+        // Transient/network failures stay parked for the next visit.
+      }
+    }
+  } finally {
+    drainInFlight = false;
+  }
+  return uploaded;
+}
+
 function sourceLabel(source: string, banks: UkBank[] | undefined): string {
   if (source === "ofx") return "Parsed from OFX (exact bank transaction IDs)";
   if (source === "qif") return "Parsed from QIF";
@@ -62,6 +110,44 @@ export default function Import() {
   const banks = useQuery({
     queryKey: ["banks"],
     queryFn: async () => (await api.get<UkBank[]>("/api/v1/banks")).data,
+  });
+  const inbox = useQuery({
+    queryKey: ["inbox"],
+    queryFn: async () => (await api.get<InboxFile[]>("/api/v1/imports/inbox")).data,
+  });
+
+  // Pick up files shared via the OS share sheet (parked by the service worker).
+  useEffect(() => {
+    drainSharedFiles().then((n) => {
+      if (n > 0) qc.invalidateQueries({ queryKey: ["inbox"] });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const inboxPreviewMut = useMutation({
+    mutationFn: async (vars: { filename: string; accountId: string }) => {
+      const { data } = await api.post<PreviewResponse>(
+        `/api/v1/imports/inbox/${encodeURIComponent(vars.filename)}/preview`,
+        { account_id: Number(vars.accountId) },
+      );
+      return data;
+    },
+    onSuccess: (data) => {
+      setPreview(data);
+      const next: Record<number, RowChoice> = {};
+      for (const r of data.rows) {
+        next[r.id] = { skip: r.is_duplicate, category_id: r.suggested_category_id };
+      }
+      setChoices(next);
+      setSaveProfile(Boolean(data.inferred_config) && !data.has_profile);
+      setCommittedSummary(null);
+      qc.invalidateQueries({ queryKey: ["inbox"] });
+    },
+  });
+  const inboxDiscardMut = useMutation({
+    mutationFn: async (filename: string) =>
+      api.delete(`/api/v1/imports/inbox/${encodeURIComponent(filename)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inbox"] }),
   });
 
   const [accountId, setAccountId] = useState("");
@@ -177,6 +263,53 @@ export default function Import() {
         title="Import statement"
         subtitle="Upload a statement downloaded from your bank — review the parsed rows, then commit."
       />
+
+      {!preview && (inbox.data?.length ?? 0) > 0 && (
+        <Card className="mb-6 p-5">
+          <div className="flex items-center gap-2">
+            <Inbox className="h-4 w-4 text-brand-700" />
+            <h2 className="text-sm font-semibold text-slate-900">
+              Statement inbox — {inbox.data?.length} file{(inbox.data?.length ?? 0) > 1 ? "s" : ""} waiting
+            </h2>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Shared from your phone or dropped into the inbox folder. Pick the account, then review.
+          </p>
+          <ul className="mt-3 divide-y divide-slate-100">
+            {inbox.data?.map((f) => (
+              <li key={f.filename} className="flex flex-wrap items-center gap-3 py-2 text-sm">
+                <span className="min-w-0 flex-1 truncate font-medium">{f.filename}</span>
+                <span className="text-xs text-slate-400 nums">{(f.size / 1024).toFixed(0)} KiB</span>
+                <Button
+                  className="!py-1.5"
+                  disabled={!accountId || inboxPreviewMut.isPending}
+                  title={accountId ? "Review this file" : "Choose an account below first"}
+                  onClick={() => inboxPreviewMut.mutate({ filename: f.filename, accountId })}
+                >
+                  Review
+                </Button>
+                <button
+                  onClick={() => inboxDiscardMut.mutate(f.filename)}
+                  className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                  title="Discard"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </li>
+            ))}
+          </ul>
+          {!accountId && (
+            <p className="mt-2 text-xs text-amber-700">Select an account in the form below to enable review.</p>
+          )}
+          {inboxPreviewMut.isError && (
+            <p className="mt-2 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
+              Couldn't parse that file:{" "}
+              {((inboxPreviewMut.error as { response?: { data?: { detail?: string } } })?.response
+                ?.data?.detail) ?? "check it's a valid statement."}
+            </p>
+          )}
+        </Card>
+      )}
 
       {!preview && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
