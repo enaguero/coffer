@@ -10,6 +10,7 @@ import Dashboard from "./pages/Dashboard";
 import Debts from "./pages/Debts";
 import Forecast from "./pages/Forecast";
 import Goals from "./pages/Goals";
+import Household from "./pages/Household";
 import Import from "./pages/Import";
 import Integrity from "./pages/Integrity";
 import Login from "./pages/Login";
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="networth" element={<NetWorth />} />
           <Route path="import" element={<Import />} />
           <Route path="integrity" element={<Integrity />} />
+          <Route path="household" element={<Household />} />
         </Route>
       </Route>
     </Routes>

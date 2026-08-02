@@ -35,6 +35,14 @@ export default function Accounts() {
     mutationFn: async (payload: Partial<Account>) => (await api.post("/api/v1/accounts", payload)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
+
+  const setVisibilityMut = useMutation({
+    mutationFn: async (vars: { id: number; visibility: "private" | "household" }) =>
+      (await api.patch(`/api/v1/accounts/${vars.id}`, { visibility: vars.visibility })).data,
+    onSuccess: () => {
+      for (const key of ["accounts", "household-shared"]) qc.invalidateQueries({ queryKey: [key] });
+    },
+  });
   const setWrapperMut = useMutation({
     mutationFn: async (vars: { id: number; uk_wrapper: UkWrapper | null }) =>
       (await api.patch(`/api/v1/accounts/${vars.id}`, { uk_wrapper: vars.uk_wrapper })).data,
@@ -183,6 +191,7 @@ export default function Accounts() {
                 <th className="w-32 px-5 py-3 text-left font-medium">Type</th>
                 <th className="px-5 py-3 text-left font-medium">Institution</th>
                 <th className="w-32 px-5 py-3 text-left font-medium">UK wrapper</th>
+                <th className="w-28 px-5 py-3 text-left font-medium">Sharing</th>
                 <th className="w-40 px-5 py-3 text-right font-medium">Opening balance</th>
                 <th className="w-12 px-5 py-3"></th>
               </tr>
@@ -220,6 +229,22 @@ export default function Accounts() {
                     ) : (
                       <span className="text-xs text-slate-400">—</span>
                     )}
+                  </td>
+                  <td className="px-5 py-3">
+                    <Select
+                      value={a.visibility}
+                      onChange={(e) =>
+                        setVisibilityMut.mutate({
+                          id: a.id,
+                          visibility: e.target.value as "private" | "household",
+                        })
+                      }
+                      className="!w-28 !py-1 text-xs"
+                      title="Household-visible accounts appear read-only to your household members"
+                    >
+                      <option value="private">Private</option>
+                      <option value="household">Household</option>
+                    </Select>
                   </td>
                   <td className="px-5 py-3 text-right nums">
                     {fmtMoney(a.opening_balance, a.currency)}

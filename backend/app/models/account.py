@@ -52,6 +52,9 @@ class Account(Base, TimestampMixin):
     )
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     opening_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), nullable=False)
+    # "private" (default) or "household": household-visible accounts appear
+    # read-only to the other members of the owner's household.
+    visibility: Mapped[str] = mapped_column(String(10), default="private", nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="accounts")  # noqa: F821
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account", cascade="all, delete-orphan")  # noqa: F821

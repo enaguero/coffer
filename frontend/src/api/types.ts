@@ -33,6 +33,7 @@ export interface Account {
   uk_wrapper: UkWrapper | null;
   currency: string;
   opening_balance: string;
+  visibility: "private" | "household";
 }
 
 export interface AllowanceMeter {
@@ -444,4 +445,43 @@ export interface Replay {
   files_with_drift: number;
   files_missing: number;
   files_failed: number;
+}
+
+export interface HouseholdMember {
+  user_id: number;
+  email: string;
+  full_name: string | null;
+  role: string;
+  is_me: boolean;
+}
+
+export interface Household {
+  id: number;
+  name: string;
+  my_role: string;
+  members: HouseholdMember[];
+}
+
+export interface HouseholdInvite {
+  token: string;
+  expires_at: string;
+}
+
+export interface SharedAccount {
+  account_id: number;
+  owner_user_id: number;
+  owner_name: string;
+  name: string;
+  type: string;
+  currency: string;
+  balance: string;
+  as_of: string | null;
+  source: string;
+}
+
+export interface SharedView {
+  household_id: number;
+  household_name: string;
+  accounts: SharedAccount[];
+  totals: { currency: string; total: string }[];
 }
