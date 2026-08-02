@@ -24,6 +24,7 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
+import GettingStarted from "../components/GettingStarted";
 import type { AccountCoverage, BudgetMonthView, DebtSummary, Goal, Surplus } from "../api/types";
 import { Badge, Card, EmptyState, PageHeader, ProgressBar, StatCard } from "../components/ui";
 import { CHART_COLORS, fmtMoney, MONTH_NAMES, toNum } from "../lib/format";
@@ -91,6 +92,8 @@ export default function Dashboard() {
         title={`${MONTH_NAMES[month - 1]} ${year}`}
         subtitle="Your monthly snapshot — income, spending, debt, and goals."
       />
+
+      <GettingStarted />
 
       {(surplus.data?.raises_detected.length ?? 0) > 0 && (
         <div className="mb-4 space-y-2">

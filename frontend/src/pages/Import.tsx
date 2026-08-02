@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { api } from "../api/client";
 import type { Account, Category, ImportProfileConfig, UkBank } from "../api/types";
-import { Badge, Button, Card, Label, PageHeader, Select } from "../components/ui";
+import { Badge, Button, Card, Input, Label, PageHeader, Select } from "../components/ui";
 import { fmtMoneySigned, toNum } from "../lib/format";
 
 interface PreviewRow {
@@ -34,6 +34,22 @@ interface RowChoice {
   skip: boolean;
   category_id: number | null;
 }
+
+/** A file waiting in the backfill queue. Files advance pending → reviewing →
+ * done/skipped/failed; the next pending file auto-previews after each. */
+interface QueuedFile {
+  file: File;
+  status: "pending" | "reviewing" | "done" | "failed" | "skipped";
+  note?: string;
+}
+
+const QUEUE_TONE: Record<QueuedFile["status"], "slate" | "sky" | "emerald" | "rose" | "amber"> = {
+  pending: "slate",
+  reviewing: "sky",
+  done: "emerald",
+  failed: "rose",
+  skipped: "amber",
+};
 
 interface InboxFile {
   filename: string;
@@ -151,7 +167,10 @@ export default function Import() {
   });
 
   const [accountId, setAccountId] = useState("");
-  const [file, setFile] = useState<File | null>(null);
+  const [queue, setQueue] = useState<QueuedFile[]>([]);
+  const [reviewingIndex, setReviewingIndex] = useState<number | null>(null);
+  const [showNewAccount, setShowNewAccount] = useState(false);
+  const [newAcct, setNewAcct] = useState({ name: "", type: "checking", currency: "GBP", bank_id: "" });
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [choices, setChoices] = useState<Record<number, RowChoice>>({});
   const [saveProfile, setSaveProfile] = useState(false);
@@ -160,6 +179,47 @@ export default function Import() {
     skipped_duplicates: number;
     auto_categorized: number;
   } | null>(null);
+
+  // First-run: the fastest path to a first import is creating the account
+  // right here instead of bouncing to the Accounts page.
+  useEffect(() => {
+    if (accounts.data && accounts.data.length === 0) setShowNewAccount(true);
+  }, [accounts.data]);
+
+  const createAccountMut = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<Account>("/api/v1/accounts", {
+          name: newAcct.name,
+          type: newAcct.type,
+          currency: newAcct.currency,
+          bank_id: newAcct.bank_id || null,
+          opening_balance: "0",
+        })
+      ).data,
+    onSuccess: (a) => {
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      setAccountId(String(a.id));
+      setShowNewAccount(false);
+      setNewAcct({ name: "", type: "checking", currency: "GBP", bank_id: "" });
+    },
+  });
+
+  function startFile(index: number, files: QueuedFile[]) {
+    setReviewingIndex(index);
+    setQueue(files.map((f, i) => (i === index ? { ...f, status: "reviewing" } : f)));
+    previewMut.mutate({ accountId, file: files[index].file });
+  }
+
+  /** Close out the file under review and auto-advance to the next pending one. */
+  function finishCurrent(status: "done" | "failed" | "skipped", note?: string) {
+    if (reviewingIndex === null) return;
+    const next = queue.map((f, i) => (i === reviewingIndex ? { ...f, status, note } : f));
+    setQueue(next);
+    setReviewingIndex(null);
+    const nextIdx = next.findIndex((f) => f.status === "pending");
+    if (nextIdx !== -1) startFile(nextIdx, next);
+  }
 
   const previewMut = useMutation({
     mutationFn: async (vars: { accountId: string; file: File }) => {
@@ -184,7 +244,11 @@ export default function Import() {
       setChoices(next);
       // Default to remembering the detected layout when there's nothing saved yet.
       setSaveProfile(Boolean(data.inferred_config) && !data.has_profile);
-      setCommittedSummary(null);
+    },
+    onError: (err) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "parse failed";
+      finishCurrent("failed", detail);
     },
   });
 
@@ -213,9 +277,13 @@ export default function Import() {
           // ignore
         }
       }
-      setCommittedSummary(data);
+      setCommittedSummary((prev) => ({
+        rows_imported: (prev?.rows_imported ?? 0) + data.rows_imported,
+        skipped_duplicates: (prev?.skipped_duplicates ?? 0) + data.skipped_duplicates,
+        auto_categorized: (prev?.auto_categorized ?? 0) + data.auto_categorized,
+      }));
       setPreview(null);
-      setFile(null);
+      finishCurrent("done", `${data.rows_imported} rows imported`);
       // An import changes balances everywhere derived data is cached.
       for (const key of ["transactions", "goals", "networth", "surplus", "coverage", "recurring", "forecast", "allowances"]) {
         qc.invalidateQueries({ queryKey: [key] });
@@ -228,15 +296,17 @@ export default function Import() {
       api.delete(`/api/v1/imports/${import_id}`),
     onSuccess: () => {
       setPreview(null);
-      setFile(null);
+      finishCurrent("skipped", "discarded without importing");
     },
   });
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!accountId || !file) return;
+    if (!accountId) return;
+    const idx = queue.findIndex((f) => f.status === "pending");
+    if (idx === -1) return;
     setCommittedSummary(null);
-    previewMut.mutate({ accountId, file });
+    startFile(idx, queue);
   }
 
   function setRow(id: number, patch: Partial<RowChoice>) {
@@ -317,36 +387,149 @@ export default function Import() {
             <form onSubmit={onSubmit} className="space-y-5">
               <label>
                 <Label>Account</Label>
-                <Select required value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                <Select
+                  required
+                  value={showNewAccount ? "__new" : accountId}
+                  onChange={(e) => {
+                    if (e.target.value === "__new") {
+                      setShowNewAccount(true);
+                    } else {
+                      setShowNewAccount(false);
+                      setAccountId(e.target.value);
+                    }
+                  }}
+                >
                   <option value="">Choose an account…</option>
                   {accounts.data?.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
+                  <option value="__new">＋ New account…</option>
                 </Select>
               </label>
 
+              {showNewAccount && (
+                <div className="rounded-lg border border-brand-200 bg-brand-50/40 p-4">
+                  <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                    New account
+                  </div>
+                  <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <label>
+                      <Label>Name</Label>
+                      <Input
+                        value={newAcct.name}
+                        onChange={(e) => setNewAcct((s) => ({ ...s, name: e.target.value }))}
+                        placeholder="e.g. Monzo Current"
+                      />
+                    </label>
+                    <label>
+                      <Label>Bank</Label>
+                      <Select
+                        value={newAcct.bank_id}
+                        onChange={(e) => setNewAcct((s) => ({ ...s, bank_id: e.target.value }))}
+                      >
+                        <option value="">Not listed / manual</option>
+                        {banks.data?.map((b) => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </Select>
+                    </label>
+                    <label>
+                      <Label>Type</Label>
+                      <Select
+                        value={newAcct.type}
+                        onChange={(e) => setNewAcct((s) => ({ ...s, type: e.target.value }))}
+                      >
+                        <option value="checking">Checking / current</option>
+                        <option value="savings">Savings</option>
+                        <option value="credit_card">Credit card</option>
+                        <option value="loan">Loan</option>
+                        <option value="overdraft">Overdraft</option>
+                        <option value="cash">Cash</option>
+                        <option value="other">Other (pension, property…)</option>
+                      </Select>
+                    </label>
+                    <label>
+                      <Label>Currency</Label>
+                      <Input
+                        value={newAcct.currency}
+                        maxLength={3}
+                        onChange={(e) => setNewAcct((s) => ({ ...s, currency: e.target.value.toUpperCase() }))}
+                        className="uppercase"
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      type="button"
+                      className="!py-1.5"
+                      disabled={!newAcct.name.trim() || !/^[A-Z]{3}$/.test(newAcct.currency) || createAccountMut.isPending}
+                      onClick={() => createAccountMut.mutate()}
+                    >
+                      {createAccountMut.isPending ? "Creating…" : "Create account"}
+                    </Button>
+                    {(accounts.data?.length ?? 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowNewAccount(false)}
+                        className="text-xs text-slate-500 hover:text-slate-700"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    {createAccountMut.isError && (
+                      <span className="text-xs text-rose-600">Couldn't create the account — check the fields.</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <label className="block">
-                <Label>File (CSV, OFX, QIF, or PDF)</Label>
+                <Label>Files (CSV, OFX, QIF, or PDF — select several to backfill months at once)</Label>
                 <div className="mt-1 flex items-center justify-center rounded-lg border-2 border-dashed border-slate-300 bg-slate-50 px-6 py-8 hover:border-brand-500 hover:bg-brand-50/30 transition cursor-pointer">
                   <input
-                    type="file" required accept=".csv,.ofx,.qfx,.qif,.pdf"
-                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                    type="file" required multiple accept=".csv,.ofx,.qfx,.qif,.pdf"
+                    onChange={(e) =>
+                      setQueue(Array.from(e.target.files ?? []).map((file) => ({ file, status: "pending" as const })))
+                    }
                     className="sr-only"
                     id="statement-file"
                   />
                   <label htmlFor="statement-file" className="text-center cursor-pointer">
                     <FileUp className="mx-auto h-8 w-8 text-slate-400" />
                     <div className="mt-2 text-sm font-medium text-slate-900">
-                      {file ? file.name : "Click to choose a file"}
+                      {queue.length === 0
+                        ? "Click to choose files"
+                        : queue.length === 1
+                          ? queue[0].file.name
+                          : `${queue.length} files queued`}
                     </div>
                     <div className="mt-0.5 text-xs text-slate-500">CSV, OFX, QIF, or PDF</div>
                   </label>
                 </div>
               </label>
 
-              <Button type="submit" disabled={previewMut.isPending || !file || !accountId}>
+              {queue.length > 1 && (
+                <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+                  {queue.map((q, i) => (
+                    <li key={i} className="flex items-center gap-3 px-3 py-1.5 text-sm">
+                      <span className="min-w-0 flex-1 truncate">{q.file.name}</span>
+                      {q.note && <span className="max-w-[200px] truncate text-xs text-slate-400">{q.note}</span>}
+                      <Badge tone={QUEUE_TONE[q.status]}>{q.status}</Badge>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <Button
+                type="submit"
+                disabled={previewMut.isPending || !accountId || !queue.some((f) => f.status === "pending")}
+              >
                 <Upload className="h-4 w-4" />
-                {previewMut.isPending ? "Parsing…" : "Parse for review"}
+                {previewMut.isPending
+                  ? "Parsing…"
+                  : queue.length > 1
+                    ? "Start review queue"
+                    : "Parse for review"}
               </Button>
 
               {previewMut.isError && (
