@@ -150,15 +150,21 @@ def compute_net_worth(
     today = today or date.today()
     rates = rates or {}
 
-    def to_display(amount: Decimal, currency: str) -> Decimal | None:
+    def has_rate(currency: str) -> bool:
+        if display_currency is None or currency == display_currency:
+            return True
+        rate = rates.get(currency)
+        return rate is not None and rate > 0
+
+    def to_display(amount: Decimal, currency: str) -> Decimal:
+        """Callers only pass convertible currencies — has_rate() gates them."""
         if display_currency is None:
             return amount  # legacy mixed-sum behavior when no display set
-        return convert(amount, currency, display_currency, rates)
+        got = convert(amount, currency, display_currency, rates)
+        assert got is not None
+        return got
 
-    convertible = {
-        a.id: display_currency is None or to_display(Decimal("0"), a.currency) is not None
-        for a in accounts
-    }
+    convertible = {a.id: has_rate(a.currency) for a in accounts}
     excluded = sorted({a.currency for a in accounts if not convertible[a.id]})
     tracked_ids = {a.id for a in accounts}
     unlinked = [
@@ -167,18 +173,16 @@ def compute_net_worth(
     unlinked_total = sum((bal for _, _, bal in unlinked), Decimal("0"))
 
     balances = [current_balance(a, today) for a in accounts]
-    currency_by_id = {a.id: a.currency for a in accounts}
     for b in balances:
         b.converted = convertible[b.id]
 
-    def display_balance(b: AccountBalance) -> Decimal:
-        got = to_display(b.balance, currency_by_id[b.id])
-        return got if got is not None else Decimal("0")
-
-    assets = sum((display_balance(b) for b in balances if b.type in ASSET_TYPES and b.converted), Decimal("0"))
+    assets = sum(
+        (to_display(b.balance, b.currency) for b in balances if b.type in ASSET_TYPES and b.converted), Decimal("0")
+    )
     # Liability accounts usually carry negative balances; count their magnitude.
     account_liabilities = sum(
-        (-display_balance(b) for b in balances if b.type in LIABILITY_TYPES and b.converted), Decimal("0")
+        (-to_display(b.balance, b.currency) for b in balances if b.type in LIABILITY_TYPES and b.converted),
+        Decimal("0"),
     )
     # Register debts carry no currency of their own — treated as display currency.
     liabilities = account_liabilities + unlinked_total
@@ -186,8 +190,7 @@ def compute_net_worth(
     series: list[NetWorthPoint] = []
 
     def series_balance(acc: AccountData, on: date) -> Decimal:
-        got = to_display(balance_at(acc, on), acc.currency)
-        return got if got is not None else Decimal("0")
+        return to_display(balance_at(acc, on), acc.currency)
 
     for on in _month_ends(today, months):
         a = sum(

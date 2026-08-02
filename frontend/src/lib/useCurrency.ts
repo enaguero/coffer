@@ -6,8 +6,9 @@ import { useAuth } from "../contexts/useAuth";
 
 /**
  * The user's display currency: their explicit setting when present, else the
- * most common currency across their accounts (matching the backend's
- * _display_currency fallback), else USD.
+ * most common currency across their accounts — ties break alphabetically,
+ * mirroring the backend's resolve_display_currency so both sides always
+ * elect the same code — else USD.
  */
 export function useUserCurrency(): string {
   const { user } = useAuth();
@@ -20,7 +21,7 @@ export function useUserCurrency(): string {
   if (!data || data.length === 0) return "USD";
   const counts: Record<string, number> = {};
   for (const a of data) counts[a.currency] = (counts[a.currency] ?? 0) + 1;
-  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
 }
 
 /** Map account_id -> currency, for per-row formatting in transaction tables. */

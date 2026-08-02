@@ -25,10 +25,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.account import LIQUID_ACCOUNT_TYPES
 from app.models.debt import Debt
 from app.models.user import User
-from app.services.account_loader import load_account_data, load_txn_lites
+from app.services.account_loader import load_forecast_scope, load_txn_lites
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import current_balance
@@ -59,7 +58,10 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     sections: list[str] = []
 
     # One data load feeds freshness, the accounts list, and the forecast start.
-    account_data = load_account_data(db, user.id)
+    # The projection shares the forecast endpoint's single-currency scope so
+    # the emailed warning can never disagree with the in-app forecast.
+    account_data, _display, in_display, _excluded = load_forecast_scope(db, user)
+    included_ids = {a.id for a in in_display}
 
     # --- Data freshness -------------------------------------------------------
     # Fresh = a recent transaction OR a recent balance snapshot: valuation-only
@@ -92,7 +94,7 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
         sections.append("PROMO RATE CLIFFS — clear these before the rate reverts:\n" + "\n".join(lines))
 
     # --- Upcoming bills + renewals -------------------------------------------
-    txns = load_txn_lites(db, user.id)
+    txns = load_txn_lites(db, user.id, account_ids=included_ids)
     items = detect_recurring(txns, today=today)
     active = [i for i in items if i.active]
     bills = [
@@ -124,10 +126,7 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
         sections.append("RENEWALS COMING — cancel before they charge:\n" + "\n".join(lines))
 
     # --- Projected low balance ------------------------------------------------
-    start_balance = sum(
-        (current_balance(a).balance for a in account_data if a.type in LIQUID_ACCOUNT_TYPES),
-        Decimal("0"),
-    )
+    start_balance = sum((current_balance(a).balance for a in in_display), Decimal("0"))
     forecast = project(start_balance, items, days=30, today=today)
     if forecast.first_below_zero is not None:
         sections.append(

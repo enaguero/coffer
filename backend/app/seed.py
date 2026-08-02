@@ -116,7 +116,18 @@ def seed(db: Session) -> None:
         currency="GBP",
         opening_balance=Decimal("2000"),
     )
-    db.add_all([checking, savings])
+    # A genuinely foreign-currency account: 1,000,000 CLP ≈ £820 at the demo
+    # rate. It exercises conversion on Net Worth and exclusion on the
+    # (single-currency, GBP) forecast.
+    clp_savings = Account(
+        user_id=user.id,
+        name="Banco de Chile Ahorro",
+        type=AccountType.SAVINGS,
+        institution="Banco de Chile",
+        currency="CLP",
+        opening_balance=Decimal("1000000"),
+    )
+    db.add_all([checking, savings, clp_savings])
     db.flush()
 
     # ---- Debt accounts + Debt records + debt-payment categories
@@ -143,8 +154,11 @@ def seed(db: Session) -> None:
             name=dname,
             type=dtype,
             institution=dname.split()[0],
-            # Chilean debts are CLP; UK ones GBP — a genuinely dual-currency household.
-            currency="CLP" if dname.split()[0] in {"CMR", "Banco", "Tarjeta"} else "GBP",
+            # All debt figures (balances, minimums, budget lines, payments from
+            # GBP checking) are one coherent unit — the register has no
+            # currency column, so foreign-denominated debts would contradict
+            # the planner. Multi-currency is demoed by the CLP savings account.
+            currency="GBP",
             opening_balance=-balance,
         )
         db.add(acct)

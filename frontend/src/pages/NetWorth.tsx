@@ -13,7 +13,18 @@ import {
 
 import { api } from "../api/client";
 import type { Account, Allowances, FxRate, NetWorth as NetWorthData } from "../api/types";
-import { Badge, Button, Card, Input, Label, PageHeader, ProgressBar, Select, StatCard } from "../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  Input,
+  Label,
+  PageHeader,
+  ProgressBar,
+  Select,
+  StatCard,
+  WarningBanner,
+} from "../components/ui";
 import { useAuth } from "../contexts/useAuth";
 import { fmtMoney, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
@@ -41,27 +52,35 @@ export default function NetWorth() {
   });
   const [newFxCurrency, setNewFxCurrency] = useState("");
   const [newFxRate, setNewFxRate] = useState("");
+  // Rates travel as strings so high-precision values survive; parseFloat
+  // would silently truncate inputs like "1,000" to 1.
+  const rateValid = /^(\d+\.?\d*|\.\d+)$/.test(newFxRate) && Number(newFxRate) > 0;
+  const invalidateFx = (keys: string[]) => {
+    for (const key of keys) qc.invalidateQueries({ queryKey: [key] });
+  };
   const saveRate = useMutation({
-    mutationFn: async (vars: { currency: string; rate: number }) =>
+    mutationFn: async (vars: { currency: string; rate: string }) =>
       api.put("/api/v1/fx", [{ currency: vars.currency, rate: vars.rate }]),
     onSuccess: () => {
       setNewFxCurrency("");
       setNewFxRate("");
-      for (const key of ["fx", "networth", "forecast"]) qc.invalidateQueries({ queryKey: [key] });
+      invalidateFx(["fx", "networth"]);
     },
   });
   const deleteRate = useMutation({
     mutationFn: async (currency: string) => api.delete(`/api/v1/fx/${currency}`),
-    onSuccess: () => {
-      for (const key of ["fx", "networth", "forecast"]) qc.invalidateQueries({ queryKey: [key] });
-    },
+    onSuccess: () => invalidateFx(["fx", "networth"]),
   });
   const setDisplayCurrency = useMutation({
-    mutationFn: async (display_currency: string) =>
+    // null clears the setting back to automatic (most-common currency).
+    mutationFn: async (display_currency: string | null) =>
       api.patch("/api/v1/auth/me", { display_currency }),
-    onSuccess: async () => {
-      await refresh?.();
-      for (const key of ["networth", "forecast", "accounts"]) qc.invalidateQueries({ queryKey: [key] });
+    onSuccess: () => {
+      // The server deletes saved rates on a display change — refetch them too.
+      // Invalidate before refresh() so a failed user refetch can't strand
+      // stale totals.
+      invalidateFx(["fx", "networth", "forecast"]);
+      void refresh().catch(() => {});
     },
   });
   const networth = useQuery({
@@ -100,6 +119,9 @@ export default function NetWorth() {
   }
 
   const nw = networth.data;
+  // The response says which currency the totals were converted into — trust
+  // it over the hook so a tie-broken fallback can't mislabel the numbers.
+  const displayCcy = nw?.display_currency ?? currency;
   const chartData =
     nw?.series.map((p) => ({
       on: p.on.slice(0, 7),
@@ -118,29 +140,29 @@ export default function NetWorth() {
         }.`}
       />
 
-      {(nw?.excluded_currencies.length ?? 0) > 0 && (
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+      {(nw?.excluded_currencies?.length ?? 0) > 0 && (
+        <WarningBanner className="mb-4">
           Accounts in {nw?.excluded_currencies.join(", ")} are <strong>excluded from the totals</strong> —
           no exchange rate saved. Add rates below to include them.
-        </div>
+        </WarningBanner>
       )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <StatCard
           label="Net worth"
-          value={fmtMoney(nw?.net, currency)}
+          value={fmtMoney(nw?.net, displayCcy)}
           icon={<Scale className="h-5 w-5" />}
           accent={nw && toNum(nw.net) >= 0 ? "brand" : "rose"}
         />
         <StatCard
           label="Assets"
-          value={fmtMoney(nw?.assets, currency)}
+          value={fmtMoney(nw?.assets, displayCcy)}
           icon={<PiggyBank className="h-5 w-5" />}
           accent="emerald"
         />
         <StatCard
           label="Liabilities"
-          value={fmtMoney(nw?.liabilities, currency)}
+          value={fmtMoney(nw?.liabilities, displayCcy)}
           icon={<Landmark className="h-5 w-5" />}
           accent="rose"
         />
@@ -177,8 +199,8 @@ export default function NetWorth() {
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                 <XAxis dataKey="on" tick={{ fontSize: 11 }} minTickGap={40} />
-                <YAxis tick={{ fontSize: 11 }} width={80} tickFormatter={(v) => fmtMoney(v, currency)} />
-                <Tooltip formatter={(v) => fmtMoney(v as number, currency)} />
+                <YAxis tick={{ fontSize: 11 }} width={80} tickFormatter={(v) => fmtMoney(v, displayCcy)} />
+                <Tooltip formatter={(v) => fmtMoney(v as number, displayCcy)} />
                 <Area type="monotone" dataKey="net" stroke="#10b981" fill="url(#nwFill)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
@@ -274,7 +296,7 @@ export default function NetWorth() {
                     </td>
                     <td className="py-2 text-xs text-slate-500">register</td>
                     <td className="py-2 text-right nums font-medium text-rose-600">
-                      −{fmtMoney(d.balance, currency)}
+                      −{fmtMoney(d.balance, displayCcy)}
                     </td>
                   </tr>
                 ))}
@@ -323,20 +345,24 @@ export default function NetWorth() {
             <h2 className="text-sm font-semibold text-slate-900">Currency</h2>
             <label className="mt-2 block">
               <Label>Display currency (all totals shown in this)</Label>
-              <Input
-                defaultValue={user?.display_currency ?? currency}
-                maxLength={3}
-                onBlur={(e) => {
-                  const v = e.target.value.toUpperCase();
-                  if (v.length === 3 && v !== (user?.display_currency ?? "")) {
-                    setDisplayCurrency.mutate(v);
-                  }
-                }}
-                className="!w-24 uppercase"
-              />
+              <Select
+                value={user?.display_currency ?? ""}
+                onChange={(e) => setDisplayCurrency.mutate(e.target.value || null)}
+                disabled={setDisplayCurrency.isPending}
+              >
+                <option value="">Automatic ({displayCcy})</option>
+                {[...new Set([...(accounts.data?.map((a) => a.currency) ?? []), user?.display_currency ?? ""])]
+                  .filter(Boolean)
+                  .sort()
+                  .map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+              </Select>
             </label>
             <div className="mt-3">
-              <Label>Exchange rates (1 unit = X {user?.display_currency ?? currency})</Label>
+              <Label>Exchange rates (1 unit = X {displayCcy})</Label>
               <ul className="mt-1 space-y-1">
                 {fxRates.data?.map((r) => (
                   <li key={r.currency} className="flex items-center gap-2 text-sm">
@@ -367,16 +393,20 @@ export default function NetWorth() {
                 />
                 <Button
                   className="!py-1.5"
-                  disabled={newFxCurrency.length !== 3 || !parseFloat(newFxRate) || saveRate.isPending}
-                  onClick={() =>
-                    saveRate.mutate({ currency: newFxCurrency, rate: parseFloat(newFxRate) })
-                  }
+                  disabled={!/^[A-Z]{3}$/.test(newFxCurrency) || !rateValid || saveRate.isPending}
+                  onClick={() => saveRate.mutate({ currency: newFxCurrency, rate: newFxRate })}
                 >
                   Save rate
                 </Button>
               </div>
+              {newFxRate !== "" && !rateValid && (
+                <p className="mt-1 text-xs text-rose-600">
+                  Enter a positive number with a dot decimal, e.g. 0.00082 — no commas.
+                </p>
+              )}
               <p className="mt-2 text-xs text-slate-400">
-                Rates are manual — no external API. Changing display currency means re-entering rates.
+                Rates are manual — no external API. Changing the display currency clears saved rates
+                (they were defined against the old currency).
               </p>
             </div>
           </div>

@@ -13,16 +13,23 @@ def _check_bank_id(value: str | None) -> str | None:
     return value
 
 
+def _upper_currency(value: str | None) -> str | None:
+    # Uppercased at the edge so FX conversion and display-currency filters
+    # (exact-string comparisons) can't be defeated by a lowercase code.
+    return value.upper() if value is not None else None
+
+
 class AccountBase(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     type: AccountType
     institution: str | None = None
     bank_id: str | None = None
     uk_wrapper: UkWrapper | None = None
-    currency: str = Field(default="USD", min_length=3, max_length=3)
+    currency: str = Field(default="USD", pattern=r"^[A-Za-z]{3}$")
     opening_balance: Decimal = Decimal("0")
 
     _validate_bank_id = field_validator("bank_id")(_check_bank_id)
+    _upper_currency = field_validator("currency")(_upper_currency)
 
 
 class AccountCreate(AccountBase):
@@ -35,10 +42,11 @@ class AccountUpdate(BaseModel):
     institution: str | None = None
     bank_id: str | None = None
     uk_wrapper: UkWrapper | None = None
-    currency: str | None = None
+    currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
     opening_balance: Decimal | None = None
 
     _validate_bank_id = field_validator("bank_id")(_check_bank_id)
+    _upper_currency = field_validator("currency")(_upper_currency)
 
 
 class AccountOut(AccountBase):
