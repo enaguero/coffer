@@ -323,6 +323,30 @@ def test_surplus_counts_only_display_currency_transactions(auth_client) -> None:
     assert Decimal(s["surplus"]) == Decimal("2000.00")
 
 
+def test_budget_actuals_count_only_display_currency_accounts(auth_client) -> None:
+    client, headers, _ = auth_client
+    gbp_id = _account(client, headers, name="UK", currency="GBP", opening="0")
+    clp_id = _account(client, headers, name="Chile", currency="CLP", opening="0")
+    client.patch("/api/v1/auth/me", headers=headers, json={"display_currency": "GBP"})
+
+    cat = client.post("/api/v1/categories", headers=headers, json={"name": "Food", "kind": "expense"}).json()
+    today = date.today()
+    for account_id, amount in [(gbp_id, "-100"), (clp_id, "-90000")]:
+        r = client.post(
+            "/api/v1/transactions", headers=headers,
+            json={
+                "account_id": account_id, "posted_on": today.isoformat(),
+                "description": "groceries", "amount": amount, "category_id": cat["id"],
+            },
+        )
+        assert r.status_code == 201, r.text
+
+    view = client.get(f"/api/v1/budgets/month/{today.year}/{today.month}", headers=headers).json()
+    food = next(r for r in view["rows"] if r["category_name"] == "Food")
+    # The 90,000-CLP row must not read as £90,000 of grocery spending.
+    assert Decimal(food["actual"]) == Decimal("100.00")
+
+
 def test_account_currency_normalized_to_uppercase(auth_client) -> None:
     client, headers, _ = auth_client
     r = client.post(
