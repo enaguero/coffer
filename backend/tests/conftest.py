@@ -30,9 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 os.environ["COFFER_ENV"] = "test"
 os.environ.setdefault("JWT_SECRET", "test-secret-not-used-anywhere-real-32chars")
 
-_DEFAULT_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://coffer:coffer@db:5432/coffer"
-)
+_DEFAULT_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://coffer:coffer@db:5432/coffer")
 TEST_DB_NAME = "coffer_test"
 TEST_DATABASE_URL = os.environ.get(
     "COFFER_TEST_DATABASE_URL",
@@ -52,8 +50,7 @@ def _recreate_test_database() -> None:
     with admin.connect() as conn:
         conn.execute(
             text(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = :db AND pid <> pg_backend_pid()"
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :db AND pid <> pg_backend_pid()"
             ),
             {"db": TEST_DB_NAME},
         )
@@ -106,6 +103,32 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
         with TestClient(app) as c:
             yield c
     finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture()
+def client_committed(engine: Engine) -> Generator[tuple[TestClient, dict[str, str]], None, None]:
+    """A client whose writes COMMIT for real — needed by code that opens its
+    own DB connections (e.g. archive create/verify). Tests using this must
+    clean up (see test_backup.py's committed_engine fixture)."""
+    Maker = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    session = Maker()
+
+    def _override() -> Generator[Session, None, None]:
+        yield session
+
+    app.dependency_overrides[get_db] = _override
+    try:
+        with TestClient(app) as c:
+            r = c.post(
+                "/api/v1/auth/signup",
+                json={"email": "committed@coffer.dev", "password": "committed-pw-1234"},
+            )
+            assert r.status_code == 201, r.text
+            headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+            yield c, headers
+    finally:
+        session.close()
         app.dependency_overrides.pop(get_db, None)
 
 

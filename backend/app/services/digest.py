@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from email.message import EmailMessage
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +34,7 @@ from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
 from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
+from app.services.archive import read_meta
 
 STALE_AFTER_DAYS = 35
 PROMO_WARNING_DAYS = 60
@@ -131,6 +133,21 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
         sections.append(
             f"LOW BALANCE WARNING — projected to go below zero on {forecast.first_below_zero} "
             f"(low point {_fmt(forecast.min_balance)} on {forecast.min_balance_date})."
+        )
+
+    # --- Backup health ---------------------------------------------------------
+    # Only nag when backups are actually in a bad state: the drill failed, or
+    # archives exist but have never been verified. A fresh instance with no
+    # backups at all stays quiet here (the status endpoint covers discovery).
+    meta = read_meta(Path(settings.backup_dir))
+    if meta.get("last_verify_ok") is False:
+        sections.append(
+            "BACKUP PROBLEM — the last restore drill FAILED. Run `python -m app.backup verify` and check the archive."
+        )
+    elif meta.get("last_created") and not meta.get("last_verified"):
+        sections.append(
+            "BACKUPS UNVERIFIED — archives exist but no restore drill has run. "
+            "`python -m app.backup verify` proves your backup restores."
         )
 
     # --- One suggested action -------------------------------------------------

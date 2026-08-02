@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440
     cors_origins: str = "http://localhost:5173"
     upload_dir: str = "/app/uploads"
+    # Coffer Archive output dir (mounted volume) and how many generations to keep.
+    backup_dir: str = "/app/backups"
+    backup_keep: int = 5
     # Set to "dev" / "test" to allow the placeholder JWT secret. Anything else
     # (including unset) is treated as production and refuses to boot with a weak secret.
     coffer_env: str = "production"

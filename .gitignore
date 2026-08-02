@@ -28,3 +28,6 @@ dist-types/
 
 # Uploads
 backend/uploads/
+
+# Coffer Archive output (operator backups — never commit)
+backend/backups/

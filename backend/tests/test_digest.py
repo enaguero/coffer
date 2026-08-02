@@ -9,9 +9,16 @@ from app.core.config import settings
 
 
 @pytest.fixture(autouse=True)
-def _smtp_unconfigured(monkeypatch):
-    """Force SMTP off so tests never depend on ambient .env or send real mail."""
+def _smtp_unconfigured(monkeypatch, tmp_path):
+    """Force SMTP off and pin backup state so tests never depend on ambient
+    container state (a real backup_meta.json would change digest content)."""
     monkeypatch.setattr(settings, "smtp_host", None)
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    (backup_dir / "backup_meta.json").write_text(
+        '{"last_verified": "2099-01-01T00:00:00+00:00", "last_verify_ok": true}'
+    )
+    monkeypatch.setattr(settings, "backup_dir", str(backup_dir))
 
 
 def _account(client, headers, name="Current", type_="checking") -> int:
@@ -93,3 +100,34 @@ def test_digest_send_returns_503_without_smtp(auth_client) -> None:
     client, headers, _ = auth_client
     r = client.post("/api/v1/insights/digest/send", headers=headers)
     assert r.status_code == 503
+
+
+def test_digest_backup_warnings(auth_client, monkeypatch, tmp_path) -> None:
+    from app.core.config import settings as cfg
+
+    # No backups at all: stay quiet — a fresh instance must not be nagged weekly.
+    empty = tmp_path / "no-backups"
+    empty.mkdir()
+    monkeypatch.setattr(cfg, "backup_dir", str(empty))
+    assert "BACKUP" not in client_get_preview(auth_client)["body"]
+
+    # Archives exist but never verified: warn.
+    created = tmp_path / "created"
+    created.mkdir()
+    (created / "backup_meta.json").write_text('{"last_created": "2026-08-01T00:00:00+00:00"}')
+    monkeypatch.setattr(cfg, "backup_dir", str(created))
+    assert "BACKUPS UNVERIFIED" in client_get_preview(auth_client)["body"]
+
+    # Drill failed: loud warning.
+    failed = tmp_path / "failed"
+    failed.mkdir()
+    (failed / "backup_meta.json").write_text('{"last_created": "x", "last_verified": "y", "last_verify_ok": false}')
+    monkeypatch.setattr(cfg, "backup_dir", str(failed))
+    assert "BACKUP PROBLEM" in client_get_preview(auth_client)["body"]
+
+
+def client_get_preview(auth_client):
+    client, headers, _ = auth_client
+    r = client.get("/api/v1/insights/digest/preview", headers=headers)
+    assert r.status_code == 200
+    return r.json()
