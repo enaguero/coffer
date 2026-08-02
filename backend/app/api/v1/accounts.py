@@ -132,13 +132,20 @@ def delete_account(account_id: int, current: CurrentUser, db: DbSession) -> None
 def add_snapshot(account_id: int, payload: BalanceSnapshotIn, current: CurrentUser, db: DbSession) -> BalanceSnapshot:
     """Record a manual valuation (pension, property, ISA...) for an account.
 
-    Upserts on (account, date) — statement attestations use the same table and
-    a manual entry for the same day overrides them deliberately.
+    Upserts on (account, date) — but never on top of a statement attestation:
+    those are what the bank said, they anchor the integrity chain checks, and
+    a manual overwrite would silently rewrite the evidence. Re-import the
+    statement (or pick another day) instead.
     """
     _get_owned(db, current, account_id)
     snap = db.scalar(
         select(BalanceSnapshot).where(BalanceSnapshot.account_id == account_id, BalanceSnapshot.as_of == payload.as_of)
     )
+    if snap is not None and snap.source == BalanceSource.STATEMENT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That day's balance is attested by an imported statement — manual valuations can't overwrite it.",
+        )
     if snap is None:
         snap = BalanceSnapshot(
             user_id=current.id,

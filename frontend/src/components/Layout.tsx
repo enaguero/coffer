@@ -9,6 +9,7 @@ import {
   PiggyBank,
   Radar,
   Scale,
+  ShieldCheck,
   Target,
   Upload,
   Wallet,
@@ -31,6 +32,7 @@ const navItems = [
   { to: "/forecast", label: "Forecast", icon: Radar },
   { to: "/networth", label: "Net worth", icon: Scale },
   { to: "/import", label: "Import", icon: Upload },
+  { to: "/integrity", label: "Integrity", icon: ShieldCheck },
 ];
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>

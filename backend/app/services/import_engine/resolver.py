@@ -48,17 +48,20 @@ class ParseOutcome:
 
 
 def _attach_closing_balance(outcome: ParseOutcome) -> ParseOutcome:
-    """Latest-dated row that carries a running balance wins; among same-day
-    rows the last one in file order is taken."""
-    best: ParsedRow | None = None
-    for row in outcome.rows:
-        if row.balance is None:
-            continue
-        if best is None or row.posted_on >= best.posted_on:
-            best = row
-    if best is not None:
-        outcome.closing_balance = best.balance
-        outcome.closing_balance_date = best.posted_on
+    """Latest-dated row that carries a running balance wins. Among same-day
+    rows, file order decides which one is chronologically last: newest-first
+    exports (the common UK ordering) list the closing day's latest transaction
+    FIRST, so taking the last row in file order there would record a balance
+    that excludes the day's later activity."""
+    dated = [r for r in outcome.rows if r.balance is not None]
+    if not dated:
+        return outcome
+    newest_first = len(outcome.rows) > 1 and outcome.rows[0].posted_on > outcome.rows[-1].posted_on
+    closing_day = max(r.posted_on for r in dated)
+    same_day = [r for r in dated if r.posted_on == closing_day]
+    best = same_day[0] if newest_first else same_day[-1]
+    outcome.closing_balance = best.balance
+    outcome.closing_balance_date = best.posted_on
     return outcome
 
 

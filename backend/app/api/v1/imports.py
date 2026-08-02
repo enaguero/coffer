@@ -24,7 +24,6 @@ from app.models.account import Account
 from app.models.balance_snapshot import BalanceSnapshot, BalanceSource
 from app.models.category import Category
 from app.models.category_rule import CategoryRule
-from app.models.import_profile import ImportProfile
 from app.models.statement import StatementImport, StatementImportStatus
 from app.models.transaction import Transaction
 from app.schemas.statement import (
@@ -35,8 +34,7 @@ from app.schemas.statement import (
     StatementImportOut,
 )
 from app.services.categorization import compile_rules, match_category
-from app.services.import_engine import resolve_and_parse
-from app.services.import_engine.profile import ImportProfileConfig
+from app.services.import_engine import load_profile_config, resolve_and_parse
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -53,16 +51,13 @@ def _validate_upload(file: UploadFile) -> str:
     return suffix
 
 
-def _load_profile_config(db, account_id: int) -> ImportProfileConfig | None:
-    profile = db.scalar(select(ImportProfile).where(ImportProfile.account_id == account_id))
-    if profile is None:
-        return None
-    try:
-        return ImportProfileConfig.model_validate(profile.config)
-    except ValueError:
-        # A profile saved by an older build may no longer validate; ignore it
-        # rather than block imports.
-        return None
+def _statement_period(rows, outcome) -> tuple[object, object]:
+    """The date range the file documents: min/max row dates, else the closing-
+    balance date (a quiet statement with a balance line still covers its day)."""
+    dates = [r.posted_on for r in rows]
+    if dates:
+        return min(dates), max(dates)
+    return outcome.closing_balance_date, outcome.closing_balance_date
 
 
 def _persist_file(user_id: int, content: bytes, suffix: str) -> tuple[Path, str]:
@@ -140,10 +135,11 @@ async def upload_statement(
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
 
-    outcome = resolve_and_parse(content, suffix, account, _load_profile_config(db, account.id))
+    outcome = resolve_and_parse(content, suffix, account, load_profile_config(db, account.id))
     rows = outcome.rows
     stored_path, stored_name = _persist_file(current.id, content, suffix)
 
+    period_start, period_end = _statement_period(rows, outcome)
     record = StatementImport(
         user_id=current.id,
         account_id=account.id,
@@ -153,6 +149,8 @@ async def upload_statement(
         status=StatementImportStatus.COMMITTED,
         rows_parsed=len(rows),
         rows_imported=0,
+        period_start=period_start,
+        period_end=period_end,
     )
     db.add(record)
     db.flush()
@@ -225,7 +223,7 @@ def _create_preview(
     db, current, account: Account, content: bytes, suffix: str, original_filename: str | None
 ) -> PreviewResponse:
     """The preview pipeline, shared by direct upload and the statement inbox."""
-    profile_config = _load_profile_config(db, account.id)
+    profile_config = load_profile_config(db, account.id)
     outcome = resolve_and_parse(content, suffix, account, profile_config)
     rows = outcome.rows
     stored_path, stored_name = _persist_file(current.id, content, suffix)
@@ -262,6 +260,7 @@ def _create_preview(
             }
         )
 
+    period_start, period_end = _statement_period(rows, outcome)
     record = StatementImport(
         user_id=current.id,
         account_id=account.id,
@@ -274,6 +273,8 @@ def _create_preview(
         preview_rows=preview_rows,
         closing_balance=outcome.closing_balance,
         closing_balance_date=outcome.closing_balance_date,
+        period_start=period_start,
+        period_end=period_end,
     )
     db.add(record)
     db.commit()
@@ -495,9 +496,14 @@ def confirm_preview(import_id: int, payload: ConfirmRequest, current: CurrentUse
     imported = 0
     duplicates = 0
     auto_categorized = 0
+    skipped_ids: list[str] = []
     for row in record.preview_rows:
         override = overrides.get(row["id"])
         if override is not None and override.skip:
+            # Remember the exclusion: replay must not report a row the user
+            # deliberately left out as drift.
+            if row["external_id"]:
+                skipped_ids.append(row["external_id"])
             continue
         if row["is_duplicate"]:
             duplicates += 1
@@ -531,6 +537,7 @@ def confirm_preview(import_id: int, payload: ConfirmRequest, current: CurrentUse
 
     record.status = StatementImportStatus.COMMITTED
     record.rows_imported = imported
+    record.skipped_external_ids = skipped_ids or None
     record.preview_rows = None  # free the JSON once committed
     _record_statement_balance(db, current.id, record.account_id, record.closing_balance_date, record.closing_balance)
     db.commit()
