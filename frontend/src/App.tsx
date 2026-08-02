@@ -11,6 +11,7 @@ import Debts from "./pages/Debts";
 import Forecast from "./pages/Forecast";
 import Goals from "./pages/Goals";
 import Import from "./pages/Import";
+import Integrity from "./pages/Integrity";
 import Login from "./pages/Login";
 import NetWorth from "./pages/NetWorth";
 import Signup from "./pages/Signup";
@@ -34,6 +35,7 @@ export default function App() {
           <Route path="forecast" element={<Forecast />} />
           <Route path="networth" element={<NetWorth />} />
           <Route path="import" element={<Import />} />
+          <Route path="integrity" element={<Integrity />} />
         </Route>
       </Route>
     </Routes>

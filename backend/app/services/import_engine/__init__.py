@@ -13,6 +13,7 @@ Layered strategy for turning a downloaded bank statement into ParsedRows:
 `resolve_and_parse` in resolver.py is the single entry point.
 """
 
+from app.services.import_engine.profiles import load_profile_config
 from app.services.import_engine.resolver import ParseOutcome, resolve_and_parse
 
-__all__ = ["ParseOutcome", "resolve_and_parse"]
+__all__ = ["ParseOutcome", "load_profile_config", "resolve_and_parse"]

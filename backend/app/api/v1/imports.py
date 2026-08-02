@@ -24,7 +24,6 @@ from app.models.account import Account
 from app.models.balance_snapshot import BalanceSnapshot, BalanceSource
 from app.models.category import Category
 from app.models.category_rule import CategoryRule
-from app.models.import_profile import ImportProfile
 from app.models.statement import StatementImport, StatementImportStatus
 from app.models.transaction import Transaction
 from app.schemas.statement import (
@@ -35,8 +34,7 @@ from app.schemas.statement import (
     StatementImportOut,
 )
 from app.services.categorization import compile_rules, match_category
-from app.services.import_engine import resolve_and_parse
-from app.services.import_engine.profile import ImportProfileConfig
+from app.services.import_engine import load_profile_config, resolve_and_parse
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -53,16 +51,8 @@ def _validate_upload(file: UploadFile) -> str:
     return suffix
 
 
-def _load_profile_config(db, account_id: int) -> ImportProfileConfig | None:
-    profile = db.scalar(select(ImportProfile).where(ImportProfile.account_id == account_id))
-    if profile is None:
-        return None
-    try:
-        return ImportProfileConfig.model_validate(profile.config)
-    except ValueError:
-        # A profile saved by an older build may no longer validate; ignore it
-        # rather than block imports.
-        return None
+# Shared with the integrity replay endpoint.
+_load_profile_config = load_profile_config
 
 
 def _persist_file(user_id: int, content: bytes, suffix: str) -> tuple[Path, str]:

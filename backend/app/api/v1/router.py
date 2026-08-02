@@ -14,6 +14,7 @@ from app.api.v1 import (
     goals,
     imports,
     insights,
+    integrity,
     transactions,
 )
 
@@ -32,3 +33,4 @@ api_router.include_router(backup.router)
 api_router.include_router(fx.router)
 api_router.include_router(cashflow.router)
 api_router.include_router(insights.router)
+api_router.include_router(integrity.router)

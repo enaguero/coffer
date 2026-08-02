@@ -376,3 +376,60 @@ export interface CashflowEntryUpsert {
   month: number;
   amount: number | string;
 }
+
+export interface ChainBreak {
+  prev_as_of: string;
+  as_of: string;
+  prev_balance: string;
+  attested: string;
+  expected: string;
+  delta: string;
+}
+
+export interface AccountIntegrity {
+  account_id: number;
+  name: string;
+  currency: string;
+  statement_count: number;
+  files_missing: number;
+  first_documented: string | null;
+  last_documented: string | null;
+  missing_months: string[];
+  chain_breaks: ChainBreak[];
+}
+
+export interface Integrity {
+  accounts: AccountIntegrity[];
+}
+
+export interface ReplayRowDiff {
+  external_id: string;
+  posted_on: string;
+  description: string;
+  amount: string;
+  ledger_posted_on: string | null;
+  ledger_amount: string | null;
+}
+
+export interface ReplayReport {
+  statement_id: number;
+  account_id: number;
+  filename: string;
+  status: "ok" | "drift" | "file_missing" | "parse_failed";
+  parsed_rows: number;
+  matched: number;
+  missing_count: number;
+  altered_count: number;
+  unverifiable: number;
+  missing_from_ledger: ReplayRowDiff[];
+  altered: ReplayRowDiff[];
+  error: string | null;
+}
+
+export interface Replay {
+  files: ReplayReport[];
+  files_ok: number;
+  files_with_drift: number;
+  files_missing: number;
+  files_failed: number;
+}
