@@ -306,6 +306,16 @@ export interface Goal {
   projected_date: string | null;
 }
 
+export interface StatementImportRecord {
+  id: number;
+  account_id: number;
+  filename: string;
+  format: string;
+  status: "preview" | "committed" | "discarded";
+  rows_parsed: number;
+  rows_imported: number;
+}
+
 export interface ImportResponse {
   import_id: number;
   rows_parsed: number;

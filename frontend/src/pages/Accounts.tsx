@@ -5,9 +5,11 @@ import { useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import type { Account, AccountType, UkBank, UkWrapper } from "../api/types";
 import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, Select } from "../components/ui";
+import { ACCOUNT_TYPE_OPTIONS } from "../lib/accountTypes";
 import { fmtMoney } from "../lib/format";
 
-const ALL_TYPES: AccountType[] = ["checking", "savings", "credit_card", "loan", "overdraft", "cash", "other"];
+const ALL_TYPES: AccountType[] = ACCOUNT_TYPE_OPTIONS.map((o) => o.value);
+const TYPE_LABEL = new Map(ACCOUNT_TYPE_OPTIONS.map((o) => [o.value, o.label]));
 
 const TYPE_TONE: Record<AccountType, "emerald" | "rose" | "sky" | "amber" | "slate" | "brand"> = {
   checking: "sky",
@@ -127,7 +129,7 @@ export default function Accounts() {
             <label>
               <Label>Type</Label>
               <Select value={type} onChange={(e) => setType(e.target.value as AccountType)}>
-                {typeOptions.map((t) => <option key={t} value={t}>{t.replace("_", " ")}</option>)}
+                {typeOptions.map((t) => <option key={t} value={t}>{TYPE_LABEL.get(t) ?? t.replace("_", " ")}</option>)}
               </Select>
             </label>
             {!selectedBank && (
