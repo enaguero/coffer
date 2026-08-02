@@ -9,11 +9,13 @@ Two flows live here:
 """
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -63,8 +65,6 @@ def _load_profile_config(db, account_id: int) -> ImportProfileConfig | None:
         return None
 
 
-
-
 def _persist_file(user_id: int, content: bytes, suffix: str) -> tuple[Path, str]:
     upload_dir = Path(settings.upload_dir) / str(user_id)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -98,9 +98,7 @@ def _record_statement_balance(db, user_id: int, account_id: int, as_of, balance)
     if as_of is None or balance is None:
         return
     snap = db.scalar(
-        select(BalanceSnapshot).where(
-            BalanceSnapshot.account_id == account_id, BalanceSnapshot.as_of == as_of
-        )
+        select(BalanceSnapshot).where(BalanceSnapshot.account_id == account_id, BalanceSnapshot.as_of == as_of)
     )
     if snap is None:
         db.add(
@@ -195,9 +193,7 @@ async def upload_statement(
         imported += 1
 
     record.rows_imported = imported
-    _record_statement_balance(
-        db, current.id, account.id, outcome.closing_balance_date, outcome.closing_balance
-    )
+    _record_statement_balance(db, current.id, account.id, outcome.closing_balance_date, outcome.closing_balance)
     db.commit()
     db.refresh(record)
     return ImportResponse(
@@ -222,7 +218,13 @@ async def preview_statement(
     content = await file.read()
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
+    return _create_preview(db, current, account, content, suffix, file.filename)
 
+
+def _create_preview(
+    db, current, account: Account, content: bytes, suffix: str, original_filename: str | None
+) -> PreviewResponse:
+    """The preview pipeline, shared by direct upload and the statement inbox."""
     profile_config = _load_profile_config(db, account.id)
     outcome = resolve_and_parse(content, suffix, account, profile_config)
     rows = outcome.rows
@@ -263,7 +265,7 @@ async def preview_statement(
     record = StatementImport(
         user_id=current.id,
         account_id=account.id,
-        filename=file.filename or stored_name,
+        filename=original_filename or stored_name,
         stored_path=str(stored_path),
         format=outcome.format,
         status=StatementImportStatus.PREVIEW,
@@ -298,12 +300,127 @@ async def preview_statement(
         source=outcome.source,
         warnings=outcome.warnings,
         inferred_config=(
-            outcome.inferred_config.model_dump(mode="json")
-            if outcome.inferred_config is not None
-            else None
+            outcome.inferred_config.model_dump(mode="json") if outcome.inferred_config is not None else None
         ),
         has_profile=profile_config is not None,
     )
+
+
+# ---- Statement inbox ----------------------------------------------------------
+#
+# Files wait in <inbox_dir>/<user_id>/pending/ until reviewed. They arrive two
+# ways: POST /imports/inbox (phone share-sheet / drag-drop) or dropped straight
+# into the directory by the operator's sync tooling (Syncthing, NAS mount) —
+# the listing endpoint reads the directory live, so no watcher daemon exists.
+# Previewing an inbox file feeds the normal preview→confirm pipeline and moves
+# the file to processed/ (the preview stores its own copy in uploads).
+
+MAX_INBOX_FILE_BYTES = 10 * 1024 * 1024
+
+
+def _inbox_pending_dir(user_id: int) -> Path:
+    return Path(settings.inbox_dir) / str(user_id) / "pending"
+
+
+def _safe_inbox_file(user_id: int, filename: str) -> Path:
+    """Resolve a pending-inbox filename, rejecting traversal attempts."""
+    name = Path(filename).name  # strips any directory components
+    if not name or name != filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
+    pending = _inbox_pending_dir(user_id)
+    target = (pending / name).resolve()
+    if not target.is_relative_to(pending.resolve()):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
+    return target
+
+
+class InboxFileOut(BaseModel):
+    filename: str
+    size: int
+    modified_at: str
+
+
+@router.get("/inbox", response_model=list[InboxFileOut])
+def list_inbox(current: CurrentUser) -> list[InboxFileOut]:
+    pending = _inbox_pending_dir(current.id)
+    if not pending.is_dir():
+        return []
+    out = []
+    for f in sorted(pending.iterdir()):
+        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
+            stat = f.stat()
+            out.append(
+                InboxFileOut(
+                    filename=f.name,
+                    size=stat.st_size,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+                )
+            )
+    return out
+
+
+@router.post("/inbox", response_model=InboxFileOut, status_code=status.HTTP_201_CREATED)
+async def drop_into_inbox(current: CurrentUser, file: UploadFile = File(...)) -> InboxFileOut:
+    """Landing endpoint for the phone share-sheet and quick drops: the file
+    waits in the inbox for review — nothing is parsed or committed here."""
+    suffix = _validate_upload(file)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
+    if len(content) > MAX_INBOX_FILE_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File too large (10 MB max)")
+    pending = _inbox_pending_dir(current.id)
+    pending.mkdir(parents=True, exist_ok=True)
+    base = Path(file.filename or f"statement{suffix}").name
+    target = pending / base
+    # Never overwrite: a second share of the same name gets a numbered suffix.
+    counter = 1
+    while target.exists():
+        target = pending / f"{Path(base).stem}-{counter}{Path(base).suffix}"
+        counter += 1
+    target.write_bytes(content)
+    stat = target.stat()
+    return InboxFileOut(
+        filename=target.name,
+        size=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+    )
+
+
+class InboxPreviewRequest(BaseModel):
+    account_id: int
+
+
+@router.post("/inbox/{filename}/preview", response_model=PreviewResponse)
+def preview_inbox_file(
+    filename: str, payload: InboxPreviewRequest, current: CurrentUser, db: DbSession
+) -> PreviewResponse:
+    account = _get_user_account(db, current, payload.account_id)
+    target = _safe_inbox_file(current.id, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox file not found")
+    suffix = target.suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type")
+    content = target.read_bytes()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
+
+    response = _create_preview(db, current, account, content, suffix, target.name)
+
+    # The preview stored its own copy under uploads — archive the inbox copy.
+    processed = target.parent.parent / "processed"
+    processed.mkdir(parents=True, exist_ok=True)
+    target.rename(processed / target.name)
+    return response
+
+
+@router.delete("/inbox/{filename}", status_code=status.HTTP_204_NO_CONTENT)
+def discard_inbox_file(filename: str, current: CurrentUser) -> None:
+    target = _safe_inbox_file(current.id, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox file not found")
+    target.unlink()
 
 
 def _get_owned_import(db, current, import_id: int) -> StatementImport:
@@ -314,29 +431,19 @@ def _get_owned_import(db, current, import_id: int) -> StatementImport:
 
 
 @router.post("/{import_id}/confirm", response_model=ImportResponse)
-def confirm_preview(
-    import_id: int, payload: ConfirmRequest, current: CurrentUser, db: DbSession
-) -> ImportResponse:
+def confirm_preview(import_id: int, payload: ConfirmRequest, current: CurrentUser, db: DbSession) -> ImportResponse:
     record = _get_owned_import(db, current, import_id)
     if record.status != StatementImportStatus.PREVIEW or record.preview_rows is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Import is not a pending preview"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Import is not a pending preview")
 
     overrides = {r.id: r for r in payload.rows}
     existing_ids = _existing_external_ids(db, current.id, record.account_id)
 
     # Pre-validate that any user-provided category overrides belong to the caller.
-    overridden_cat_ids = {
-        r.category_id for r in payload.rows if r.category_id is not None and not r.skip
-    }
+    overridden_cat_ids = {r.category_id for r in payload.rows if r.category_id is not None and not r.skip}
     if overridden_cat_ids:
         owned = set(
-            db.scalars(
-                select(Category.id).where(
-                    Category.user_id == current.id, Category.id.in_(overridden_cat_ids)
-                )
-            )
+            db.scalars(select(Category.id).where(Category.user_id == current.id, Category.id.in_(overridden_cat_ids)))
         )
         bad = overridden_cat_ids - owned
         if bad:
@@ -385,9 +492,7 @@ def confirm_preview(
     record.status = StatementImportStatus.COMMITTED
     record.rows_imported = imported
     record.preview_rows = None  # free the JSON once committed
-    _record_statement_balance(
-        db, current.id, record.account_id, record.closing_balance_date, record.closing_balance
-    )
+    _record_statement_balance(db, current.id, record.account_id, record.closing_balance_date, record.closing_balance)
     db.commit()
     db.refresh(record)
     return ImportResponse(
@@ -404,9 +509,7 @@ def discard_preview(import_id: int, current: CurrentUser, db: DbSession) -> None
     record = _get_owned_import(db, current, import_id)
     if record.status != StatementImportStatus.PREVIEW:
         # Committed imports keep their record + transactions; we don't cascade-delete those.
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Only previews can be discarded"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only previews can be discarded")
     record.status = StatementImportStatus.DISCARDED
     record.preview_rows = None
     db.commit()

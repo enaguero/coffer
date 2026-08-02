@@ -5,14 +5,18 @@ import {
   LineChart,
   ListTree,
   LogOut,
+  Menu,
   PiggyBank,
   Radar,
   Scale,
   Target,
   Upload,
   Wallet,
+  X,
 } from "lucide-react";
-import { NavLink, Outlet } from "react-router-dom";
+import { useState } from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { useEffect } from "react";
 
 import { useAuth } from "../contexts/useAuth";
 
@@ -39,6 +43,9 @@ const linkClass = ({ isActive }: { isActive: boolean }) =>
 
 export default function Layout() {
   const { user, logout } = useAuth();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const location = useLocation();
+  useEffect(() => setMenuOpen(false), [location.pathname]);
   const initials = (user?.full_name ?? user?.email ?? "?")
     .split(/[\s@.]+/)
     .filter(Boolean)
@@ -48,7 +55,20 @@ export default function Layout() {
 
   return (
     <div className="flex h-full">
-      <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white">
+      {/* Mobile top bar */}
+      <div className="fixed inset-x-0 top-0 z-40 flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 md:hidden">
+        <button onClick={() => setMenuOpen((o) => !o)} aria-label="Menu" className="rounded p-1 text-slate-600">
+          {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+        </button>
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-600 text-white">
+          <Wallet className="h-4 w-4" />
+        </div>
+        <div className="text-base font-bold tracking-tight">Coffer</div>
+      </div>
+
+      <aside
+        className={`${menuOpen ? "translate-x-0" : "-translate-x-full"} fixed inset-y-0 left-0 z-30 flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white pt-14 transition-transform md:static md:translate-x-0 md:pt-0`}
+      >
         <div className="flex items-center gap-2 px-5 py-5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
             <Wallet className="h-4 w-4" />
@@ -89,8 +109,8 @@ export default function Layout() {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-auto bg-slate-50">
-        <div className="mx-auto max-w-7xl px-8 py-8">
+      <main className="flex-1 overflow-auto bg-slate-50 pt-12 md:pt-0">
+        <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-8">
           <Outlet />
         </div>
       </main>

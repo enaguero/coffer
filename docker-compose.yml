@@ -35,6 +35,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       UPLOAD_DIR: /app/uploads
       BACKUP_DIR: ${BACKUP_DIR:-/app/backups}
+      INBOX_DIR: ${INBOX_DIR:-/app/inbox}
       BACKUP_KEEP: ${BACKUP_KEEP:-5}
       COFFER_ENV: ${COFFER_ENV:-dev}
       SMTP_HOST: ${SMTP_HOST:-}
@@ -49,6 +50,7 @@ services:
       - ./backend:/app
       - backend_uploads:/app/uploads
       - backend_backups:/app/backups
+      - backend_inbox:/app/inbox
       - backend_venv:/app/.venv
     command: >
       sh -c "uv run python -m app.prestart &&
@@ -75,5 +77,6 @@ volumes:
   postgres_data:
   backend_uploads:
   backend_backups:
+  backend_inbox:
   backend_venv:
   frontend_node_modules:
