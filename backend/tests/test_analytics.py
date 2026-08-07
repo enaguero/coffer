@@ -4,7 +4,17 @@ from datetime import date
 from decimal import Decimal
 
 from app.models.account import AccountType
-from app.services.analytics.debt_plan import DebtInput, compare_strategies, simulate_payoff
+from app.services.analytics.debt_plan import (
+    DebtInput,
+    add_months,
+    compare_strategies,
+    ends_on_overrun_assumption,
+    expected_payment,
+    infer_statement_rate,
+    marginal_rate,
+    monthly_interest,
+    simulate_payoff,
+)
 from app.services.analytics.forecast import next_due_date, project
 from app.services.analytics.net_worth import AccountData, balance_at, compute_net_worth, current_balance
 from app.services.analytics.recurring import TxnLite, detect_raises, detect_recurring
@@ -22,7 +32,48 @@ def _card(balance="3000", apr="24.9", minimum="75", **kw) -> DebtInput:
         minimum_payment=Decimal(minimum) if minimum else None,
         promo_apr=kw.get("promo_apr"),
         promo_ends_on=kw.get("promo_ends_on"),
+        currency=kw.get("currency"),
     )
+
+
+def _typed(repayment_type: str, balance: str, apr=None, installment=None, original=None, ends=None, **kw) -> DebtInput:
+    """A fixed-installment-type DebtInput (amortized / flat / statement_only)."""
+    return DebtInput(
+        id=kw.get("id", 1),
+        name=kw.get("name", "Loan"),
+        balance=Decimal(balance),
+        apr=Decimal(apr) if apr is not None else None,
+        minimum_payment=None,
+        repayment_type=repayment_type,
+        installment=Decimal(installment) if installment is not None else None,
+        original_principal=Decimal(original) if original is not None else None,
+        ends_on=ends,
+        currency=kw.get("currency"),
+    )
+
+
+def _annuity_installment(balance: str, monthly_rate: str, months: int) -> Decimal:
+    """The level payment amortizing `balance` over `months` at `monthly_rate`."""
+    growth = (Decimal("1") + Decimal(monthly_rate)) ** months
+    return (Decimal(balance) * Decimal(monthly_rate) * growth / (growth - 1)).quantize(Decimal("0.01"))
+
+
+def _run_fixed_schedule(debt: DebtInput, cap: int = 120) -> tuple[int, list[Decimal]]:
+    """Month-by-month at function level (simulate_payoff wiring is U3):
+    accrue per-type interest, pay the expected payment. Returns (months to
+    clear, interest accrued each month)."""
+    balance = debt.balance
+    interests: list[Decimal] = []
+    month = 0
+    while balance > 0 and month < cap:
+        month += 1
+        on = add_months(START, month)
+        interest = monthly_interest(debt, balance, on)
+        interests.append(interest)
+        balance += interest
+        pay, _ = expected_payment(debt)
+        balance -= min(pay, balance)
+    return month, interests
 
 
 # ---- Debt simulator -----------------------------------------------------------
@@ -80,6 +131,91 @@ def test_missing_minimum_gets_assumption() -> None:
     debts = [_card(minimum=None)]
     result = simulate_payoff(debts, "avalanche", Decimal("100"), start=START)
     assert result.assumptions and "no minimum payment" in result.assumptions[0]
+
+
+# ---- Repayment-type mechanics -------------------------------------------------
+
+
+def test_amortized_schedule_reaches_zero_at_ends_on() -> None:
+    # 12% APR = 1%/month; the annuity installment over 24 months amortizes
+    # the balance exactly, so the per-type functions must land at ends_on ± 1.
+    installment = _annuity_installment("10000", "0.01", 24)
+    debt = _typed("amortized", "10000", apr="12", installment=str(installment), ends=add_months(START, 24))
+    months, interests = _run_fixed_schedule(debt)
+    assert 23 <= months <= 25
+    # Interest portion declines monotonically as the balance amortizes.
+    assert all(a > b for a, b in zip(interests, interests[1:], strict=False))
+
+
+def test_amortized_expected_payment_is_installment_superseding_minimum() -> None:
+    debt = _typed("amortized", "10000", apr="12", installment="470.73", ends=add_months(START, 24))
+    debt.minimum_payment = Decimal("75")  # must be ignored for fixed-installment types
+    pay, assumption = expected_payment(debt)
+    assert pay == Decimal("470.73")
+    assert assumption is None
+
+
+def test_flat_interest_constant_on_original_principal_and_stops_at_end() -> None:
+    ends = add_months(START, 48)
+    debt = _typed("flat", "12000", apr="10", installment="300", original="12000", ends=ends)
+    on = add_months(START, 1)
+    # original_principal × 10% / 12 = 100.00, regardless of the running balance.
+    assert monthly_interest(debt, Decimal("12000"), on) == Decimal("100.00")
+    assert monthly_interest(debt, Decimal("500"), on) == Decimal("100.00")
+    # Accrual stops entirely once past ends_on — a residual balance can't spiral.
+    assert monthly_interest(debt, Decimal("500"), add_months(START, 49)) == Decimal("0.00")
+
+
+def test_amortized_overrun_produces_assumption() -> None:
+    # Balance too high for installment × remaining term: payoff extends past
+    # ends_on and the reconciliation warning says by how much.
+    debt = _typed("amortized", "12000", apr="12", installment="470.73", ends=add_months(START, 24))
+    months, _ = _run_fixed_schedule(debt)
+    assert months > 24
+    note = ends_on_overrun_assumption(debt, add_months(START, months))
+    assert note is not None and "after the stated end date" in note
+
+
+def test_amortized_clears_early_no_overrun_assumption() -> None:
+    debt = _typed("amortized", "8000", apr="12", installment="470.73", ends=add_months(START, 24))
+    months, _ = _run_fixed_schedule(debt)
+    assert months < 24
+    assert ends_on_overrun_assumption(debt, add_months(START, months)) is None
+
+
+def test_statement_only_inference_recovers_constructed_rate() -> None:
+    # Build the installment from a known 1.5%/month (18% APR) annuity; the
+    # bisection must recover the rate within tolerance and label it estimated.
+    installment = _annuity_installment("5000", "0.015", 24)
+    debt = _typed("statement_only", "5000", installment=str(installment), ends=add_months(START, 24))
+    rate, assumption = infer_statement_rate(debt, START)
+    assert abs(rate - Decimal("18")) <= Decimal("0.05")
+    assert "estimated" in assumption.lower()
+
+
+def test_statement_only_degenerate_installment_yields_assumption_not_crash() -> None:
+    # Installment far below what could ever amortize the balance: no positive
+    # rate satisfies the annuity equation.
+    debt = _typed("statement_only", "10000", installment="50", ends=add_months(START, 12))
+    rate, assumption = infer_statement_rate(debt, START)
+    assert rate == Decimal("0")
+    assert "estimated" in assumption.lower()
+    # Non-positive term is degenerate too, never an exception.
+    past = _typed("statement_only", "10000", installment="500", ends=date(2026, 7, 1))
+    rate, assumption = infer_statement_rate(past, START)
+    assert rate == Decimal("0")
+    assert assumption
+
+
+def test_marginal_rate_per_type() -> None:
+    assert marginal_rate(_card(apr="24.9"), START) == Decimal("24.9")
+    flat = _typed("flat", "5000", apr="20", installment="200", original="6000", ends=add_months(START, 30))
+    assert marginal_rate(flat, START) == Decimal("0")
+    amortized = _typed("amortized", "10000", apr="12", installment="470.73", ends=add_months(START, 24))
+    assert marginal_rate(amortized, START) == Decimal("12")
+    installment = _annuity_installment("5000", "0.015", 24)
+    statement = _typed("statement_only", "5000", installment=str(installment), ends=add_months(START, 24))
+    assert abs(marginal_rate(statement, START) - Decimal("18")) <= Decimal("0.05")
 
 
 # ---- Recurring detection ------------------------------------------------------
@@ -268,3 +404,57 @@ def test_rank_allocations_orders_debts_by_effective_apr() -> None:
     assert kinds == ["debt", "debt", "goal", "runway"]
     goal_opt = options[2]
     assert goal_opt.months_earlier is not None and goal_opt.months_earlier > 0
+
+
+def test_rank_allocations_puts_flat_loan_below_lower_apr_revolving() -> None:
+    # A flat loan's marginal prepayment value is zero — interest is fixed on
+    # the original principal — so even a cheap revolving debt outranks it.
+    flat = _typed(
+        "flat", "5000", apr="20", installment="200", original="6000", ends=add_months(START, 30), id=1, name="Flat loan"
+    )
+    debts = [flat, _card(id=2, name="Cheap card", balance="2000", apr="6.5", minimum="50")]
+    options = rank_allocations(Decimal("300"), debts, goals=[], monthly_floor=None, today=START)
+    assert [o.name for o in options] == ["Cheap card", "Flat loan"]
+    assert options[1].apr == Decimal("0")
+    assert options[1].yearly_interest_saved == Decimal("0.00")
+
+
+def test_rank_allocations_converts_foreign_currency_debt() -> None:
+    # 1,000,000 CLP at 0.0009 → 900.00 display units: the allocation caps at
+    # the *converted* balance, so the saved figure proves conversion happened.
+    debt = _card(id=1, name="CLP card", balance="1000000", apr="30", minimum="50000", currency="CLP")
+    options = rank_allocations(
+        Decimal("2000"),
+        [debt],
+        goals=[],
+        monthly_floor=None,
+        today=START,
+        display_currency="GBP",
+        rates={"CLP": Decimal("0.0009")},
+    )
+    assert len(options) == 1
+    assert options[0].yearly_interest_saved == Decimal("270.00")  # 900 × 30%
+    assert "CLP" in options[0].note
+
+
+def test_rank_allocations_excludes_and_flags_debt_without_rate() -> None:
+    debts = [
+        _card(id=1, name="CLP card", balance="1000000", apr="30", minimum="50000", currency="CLP"),
+        _card(id=2, name="GBP card", balance="2000", apr="10", minimum="50"),
+    ]
+    options = rank_allocations(
+        Decimal("300"),
+        debts,
+        goals=[],
+        monthly_floor=None,
+        today=START,
+        display_currency="GBP",
+        rates={},
+    )
+    # The convertible debt ranks; the CLP one is flagged after it with no
+    # figures — its native magnitude never mixes into display-currency math.
+    assert [o.name for o in options] == ["GBP card", "CLP card"]
+    flagged = options[1]
+    assert flagged.apr is None
+    assert flagged.yearly_interest_saved is None
+    assert "CLP" in flagged.note and "rate" in flagged.note.lower()

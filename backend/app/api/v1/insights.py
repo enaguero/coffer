@@ -48,9 +48,7 @@ router = APIRouter(prefix="/insights", tags=["insights"])
 
 
 def _fx_rates(db, user_id: int) -> dict:
-    return {
-        r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))
-    }
+    return {r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))}
 
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
@@ -85,12 +83,14 @@ def forecast(
     start = sum((current_balance(a).balance for a in in_display), Decimal("0"))
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
     # Due markers share the calendar with display-currency amounts; debts tied
-    # to a foreign-currency account would render their minimums mislabeled.
+    # to a foreign-currency account — or carrying a foreign currency of their
+    # own — would render their minimums mislabeled.
     currency_of = {a.id: a.currency for a in account_data}
     due_days = [
         (d.name, d.due_day_of_month, d.minimum_payment)
         for d in debts
         if d.due_day_of_month is not None
+        and (display is None or d.currency is None or d.currency == display)
         and (display is None or d.account_id is None or currency_of.get(d.account_id, display) == display)
     ]
     result = project(start, items, days=days, reserve=reserve, debt_due_days=due_days)
@@ -277,7 +277,18 @@ def surplus(
         if g.account_id is None or display is None or currency_of.get(g.account_id, display) == display
     ]
 
-    options = rank_allocations(considered, _debt_inputs(db, current.id), goal_tuples, floor) if considered > 0 else []
+    options = (
+        rank_allocations(
+            considered,
+            _debt_inputs(db, current.id),
+            goal_tuples,
+            floor,
+            display_currency=display,
+            rates=_fx_rates(db, current.id),
+        )
+        if considered > 0
+        else []
+    )
 
     items = detect_recurring(load_txn_lites(db, current.id, account_ids=display_ids if display else None))
     raises = detect_raises(items)

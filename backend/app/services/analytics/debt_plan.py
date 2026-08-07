@@ -25,6 +25,12 @@ MAX_MONTHS = 600
 # balance at plan start or £25 — the standard UK credit-card floor.
 DEFAULT_MIN_PCT = Decimal("0.02")
 DEFAULT_MIN_FLOOR = Decimal("25")
+# The repayment types whose contractual payment is a fixed installment that
+# supersedes minimum_payment everywhere downstream (see models/debt.py).
+FIXED_INSTALLMENT_TYPES = frozenset({"amortized", "flat", "statement_only"})
+# Bracket ceiling for statement-only rate inference, % APR. An implied rate
+# above this is treated as degenerate input, not a plausible loan.
+STATEMENT_APR_CEILING = Decimal("200")
 
 
 @dataclass
@@ -36,6 +42,11 @@ class DebtInput:
     promo_apr: Decimal | None = None
     promo_ends_on: date | None = None
     minimum_payment: Decimal | None = None
+    repayment_type: str = "revolving"
+    installment: Decimal | None = None
+    original_principal: Decimal | None = None
+    ends_on: date | None = None
+    currency: str | None = None  # None = the user's display currency
 
     @classmethod
     def from_model(cls, d) -> DebtInput:
@@ -48,6 +59,11 @@ class DebtInput:
             promo_apr=d.promo_apr,
             promo_ends_on=d.promo_ends_on,
             minimum_payment=d.minimum_payment,
+            repayment_type=str(d.repayment_type),
+            installment=d.installment_amount,
+            original_principal=d.original_principal,
+            ends_on=d.ends_on,
+            currency=d.currency,
         )
 
 
@@ -123,6 +139,135 @@ def _resolved_minimum(debt: DebtInput) -> tuple[Decimal, bool]:
         DEFAULT_MIN_FLOOR,
     )
     return assumed, True
+
+
+# ---- Repayment-type mechanics (see the behavior matrix in docs/plans) ---------
+
+
+def _months_between(start: date, end: date) -> int:
+    return (end.year - start.year) * 12 + (end.month - start.month)
+
+
+def _annuity_installment(balance: Decimal, monthly_rate: Decimal, months: int) -> Decimal:
+    """The level payment that amortizes `balance` over `months` at `monthly_rate`
+    (a fraction per month). Strictly increasing in the rate — the property the
+    bisection in infer_statement_rate relies on."""
+    if monthly_rate == 0:
+        return balance / months
+    growth = (Decimal("1") + monthly_rate) ** months
+    return balance * monthly_rate * growth / (growth - 1)
+
+
+def infer_statement_rate(debt: DebtInput, on: date) -> tuple[Decimal, str]:
+    """Solve the annuity equation for the constant rate implied by (current
+    balance, installment, months remaining to ends_on) — bisection on the
+    monthly rate, returned as % APR with an assumption string labelling it
+    estimated. Degenerate input (no positive rate satisfies the equation, or a
+    non-positive term) returns a zero-or-clamped best effort with an explicit
+    assumption — never an exception."""
+    balance, installment = debt.balance, debt.installment
+    if installment is None or installment <= 0 or balance is None or balance <= 0:
+        return Decimal("0"), f"{debt.name}: no installment/balance to infer a rate from — estimated 0% APR"
+    months = _months_between(on, debt.ends_on) if debt.ends_on is not None else 0
+    if months <= 0:
+        return Decimal("0"), f"{debt.name}: no remaining term to infer a rate from — estimated 0% APR"
+
+    at_zero = _annuity_installment(balance, Decimal("0"), months)
+    if installment <= at_zero:
+        if installment == at_zero:
+            return Decimal("0"), f"{debt.name}: rate estimated at 0% APR from balance, installment, and remaining term"
+        return Decimal("0"), (
+            f"{debt.name}: installment {installment} is too small to amortize {balance} "
+            f"over {months} months at any rate — estimated 0% APR"
+        )
+
+    low = Decimal("0")
+    high = STATEMENT_APR_CEILING / Decimal("100") / Decimal("12")
+    if installment >= _annuity_installment(balance, high, months):
+        return STATEMENT_APR_CEILING, (
+            f"{debt.name}: entered terms imply a rate above {STATEMENT_APR_CEILING}% APR — "
+            f"estimated {STATEMENT_APR_CEILING}% APR (check the balance, installment, and end date)"
+        )
+    for _ in range(80):
+        mid = (low + high) / 2
+        if _annuity_installment(balance, mid, months) < installment:
+            low = mid
+        else:
+            high = mid
+        if high - low < Decimal("1e-9"):
+            break
+    apr = ((low + high) / 2 * Decimal("12") * Decimal("100")).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    return apr, f"{debt.name}: rate estimated at {apr}% APR from balance, installment, and remaining term"
+
+
+def monthly_interest(
+    debt: DebtInput,
+    balance: Decimal,
+    on: date,
+    statement_apr: Decimal | None = None,
+) -> Decimal:
+    """One month of interest on `balance` per the debt's mechanics:
+
+    - revolving / amortized: effective (promo-aware) rate × current balance
+    - flat: rate × ORIGINAL principal — installments never shrink — and accrual
+      stops entirely once past ends_on, so a residual balance can't spiral
+    - statement_only: inferred rate × current balance (pass `statement_apr` to
+      reuse a rate inferred once at plan start; otherwise inferred here)
+    """
+    if debt.repayment_type == "flat":
+        if debt.ends_on is not None and on > debt.ends_on:
+            return Decimal("0.00")
+        principal = debt.original_principal if debt.original_principal is not None else Decimal("0")
+        apr = debt.apr if debt.apr is not None else Decimal("0")
+        return (principal * apr / Decimal("100") / Decimal("12")).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+    if debt.repayment_type == "statement_only":
+        apr = statement_apr if statement_apr is not None else infer_statement_rate(debt, on)[0]
+        return (balance * apr / Decimal("100") / Decimal("12")).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+    rate = effective_apr(debt, on) / Decimal("100") / Decimal("12")
+    return (balance * rate).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+
+
+def expected_payment(debt: DebtInput) -> tuple[Decimal, str | None]:
+    """The month's contractual payment, following _resolved_minimum's
+    (value, assumption) shape. Fixed-installment types pay the installment —
+    superseding minimum_payment — and keep paying it past ends_on until the
+    balance clears; revolving debts pay the resolved minimum."""
+    if debt.repayment_type in FIXED_INSTALLMENT_TYPES and debt.installment is not None and debt.installment > 0:
+        return debt.installment, None
+    m, assumed = _resolved_minimum(debt)
+    if not assumed:
+        return m, None
+    missing = "installment" if debt.repayment_type in FIXED_INSTALLMENT_TYPES else "minimum payment"
+    return m, f"{debt.name}: no {missing} set — assumed max(2% of balance, £25) = {m}"
+
+
+def ends_on_overrun_assumption(debt: DebtInput, payoff_on: date | None) -> str | None:
+    """'Entered terms imply payoff N months after the stated end date' — the
+    reconciliation warning for a fixed-installment debt whose balance outlasts
+    installment × remaining term. None when the terms reconcile (payoff at or
+    before ends_on), for revolving debts, or when no end date is stated."""
+    if debt.repayment_type not in FIXED_INSTALLMENT_TYPES or debt.ends_on is None or payoff_on is None:
+        return None
+    overrun = _months_between(debt.ends_on, payoff_on)
+    if overrun <= 0:
+        return None
+    return (
+        f"{debt.name}: entered terms imply payoff {overrun} month{'s' if overrun != 1 else ''} "
+        f"after the stated end date ({debt.ends_on.isoformat()})"
+    )
+
+
+def marginal_rate(debt: DebtInput, on: date) -> Decimal:
+    """What a prepaid pound earns, per the debt's mechanics — the
+    mechanics-aware replacement for effective_apr in allocation ranking.
+    Flat loans return zero: interest is fixed on the original principal, so
+    prepayment saves nothing (v1 — no early-settlement rebate modelling).
+    Statement-only debts return the inferred (estimated) rate."""
+    if debt.repayment_type == "flat":
+        return Decimal("0")
+    if debt.repayment_type == "statement_only":
+        return infer_statement_rate(debt, on)[0]
+    return effective_apr(debt, on)
 
 
 def simulate_payoff(
