@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CalendarClock, CreditCard, Plus, Trash2, TrendingDown } from "lucide-react";
+import {
+  AlertTriangle,
+  CalendarClock,
+  CreditCard,
+  Pencil,
+  Plus,
+  Trash2,
+  TrendingDown,
+  X,
+} from "lucide-react";
 import { useState, type FormEvent } from "react";
 import {
   Area,
@@ -12,34 +21,108 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { Debt, DebtPlan, DebtPlanCompare, DebtSummary } from "../api/types";
-import { Badge, Button, Card, EmptyState, Input, Label, PageHeader, ProgressBar } from "../components/ui";
+import type { Debt, DebtPlan, DebtPlanCompare, DebtRepaymentType, DebtSummary } from "../api/types";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Input,
+  Label,
+  PageHeader,
+  ProgressBar,
+  Select,
+  WarningBanner,
+} from "../components/ui";
 import { fmtMoney, toNum } from "../lib/format";
-import { useUserCurrency } from "../lib/useCurrency";
+import { useAccountCurrencyMap, useUserCurrency } from "../lib/useCurrency";
+
+const TYPE_LABELS: Record<DebtRepaymentType, string> = {
+  revolving: "Revolving",
+  amortized: "Amortized",
+  flat: "Flat interest",
+  statement_only: "Statement-only",
+};
+
+// One-line behavior summary per type, mirroring the backend's mechanics matrix.
+const TYPE_HELP: Record<DebtRepaymentType, string> = {
+  revolving: "Interest accrues on the current balance; you pay the minimum plus any extra.",
+  amortized: "Fixed installment until the end date; interest accrues on the current balance.",
+  flat: "Interest is fixed on the original principal — installments never shrink, so prepaying saves no interest.",
+  statement_only:
+    "Only the installment, balance, and end date are known — the rate is inferred and every figure is estimated.",
+};
+
+const COMMON_CURRENCIES = ["AUD", "CAD", "CHF", "CLP", "EUR", "GBP", "JPY", "USD"];
+
+type DebtPayload = Partial<Omit<Debt, "id">>;
+
+function apiError(err: unknown): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  // Pydantic validation errors arrive as a list of {msg, ...} objects.
+  if (Array.isArray(detail) && detail.length > 0) {
+    const msg = (detail[0] as { msg?: unknown })?.msg;
+    if (typeof msg === "string") return msg.replace(/^Value error, /, "");
+  }
+  return "That change couldn't be saved — check the values.";
+}
+
+type Strategy = "optimal" | "avalanche" | "snowball";
+
+interface SnowflakeEntry {
+  month: number; // plan month, 1 = next month
+  amount: string;
+}
 
 function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: boolean }) {
-  const [strategy, setStrategy] = useState<"avalanche" | "snowball">("avalanche");
+  const [strategy, setStrategy] = useState<Strategy>("optimal");
   const [extraInput, setExtraInput] = useState("100");
   const [extra, setExtra] = useState("100");
+  const [snowflakes, setSnowflakes] = useState<SnowflakeEntry[]>([]);
+  const [sfMonth, setSfMonth] = useState("");
+  const [sfAmount, setSfAmount] = useState("");
+  const [showFullSchedule, setShowFullSchedule] = useState(false);
 
   const plan = useQuery({
-    queryKey: ["debt-plan", extra],
+    queryKey: ["debt-plan", extra, snowflakes],
     enabled: hasDebts,
     queryFn: async () =>
       (
         await api.post<DebtPlanCompare>("/api/v1/debts/plan", {
           extra_monthly: extra || "0",
+          snowflakes: snowflakes.map((s) => ({ month: s.month, amount: s.amount })),
         })
       ).data,
   });
 
   if (!hasDebts) return null;
+
+  function addSnowflake() {
+    const month = Number(sfMonth);
+    if (!Number.isInteger(month) || month < 1 || month > 600 || !(toNum(sfAmount) > 0)) return;
+    // One extra per month — re-adding the same month replaces it (the backend
+    // keeps the last entry per month anyway).
+    setSnowflakes((prev) =>
+      [...prev.filter((s) => s.month !== month), { month, amount: sfAmount }].sort(
+        (a, b) => a.month - b.month,
+      ),
+    );
+    setSfMonth("");
+    setSfAmount("");
+  }
+
   const chosen: DebtPlan | undefined = plan.data?.[strategy];
-  const other: DebtPlan | undefined = plan.data?.[strategy === "avalanche" ? "snowball" : "avalanche"];
+  const compareKey: Strategy = strategy === "avalanche" ? "snowball" : "avalanche";
+  const other: DebtPlan | undefined = plan.data?.[compareKey];
   const baseline = plan.data?.minimum;
 
   const chartData =
     chosen?.balance_series.map((p) => ({ on: p.on.slice(0, 7), balance: toNum(p.balance) })) ?? [];
+
+  const schedule = chosen?.schedule ?? [];
+  const visibleSchedule = showFullSchedule ? schedule : schedule.slice(0, 24);
+  const hasUncommitted = schedule.some((m) => toNum(m.uncommitted) > 0);
 
   return (
     <Card className="mt-6 p-6">
@@ -62,7 +145,7 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
             />
           </label>
           <div className="flex overflow-hidden rounded-lg border border-slate-300">
-            {(["avalanche", "snowball"] as const).map((s) => (
+            {(["optimal", "avalanche", "snowball"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => setStrategy(s)}
@@ -76,6 +159,58 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
           </div>
         </div>
       </div>
+
+      <div className="mt-4 flex flex-wrap items-end gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+        <label>
+          <Label>One-off extra — month #</Label>
+          <Input
+            value={sfMonth}
+            onChange={(e) => setSfMonth(e.target.value)}
+            placeholder="1 = next month"
+            className="w-32 text-right"
+          />
+        </label>
+        <label>
+          <Label>Amount</Label>
+          <Input
+            value={sfAmount}
+            onChange={(e) => setSfAmount(e.target.value)}
+            className="w-28 text-right"
+          />
+        </label>
+        <Button type="button" variant="secondary" onClick={addSnowflake} className="!py-2">
+          <Plus className="h-4 w-4" />
+          Add
+        </Button>
+        {snowflakes.map((s) => (
+          <span
+            key={s.month}
+            className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-700 ring-1 ring-inset ring-brand-200"
+          >
+            Month {s.month}: {fmtMoney(s.amount, currency)}
+            <button
+              onClick={() => setSnowflakes((prev) => prev.filter((p) => p.month !== s.month))}
+              className="text-brand-400 hover:text-brand-700"
+              title="Remove"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </span>
+        ))}
+        {snowflakes.length === 0 && (
+          <span className="pb-2 text-xs text-slate-400">
+            One-off extra payments (bonus, tax refund) — added on top of the monthly budget.
+          </span>
+        )}
+      </div>
+
+      {(plan.data?.excluded_currencies.length ?? 0) > 0 && (
+        <WarningBanner className="mt-4">
+          Debts in {plan.data?.excluded_currencies.join(", ")} are{" "}
+          <strong>excluded from this plan</strong> — no exchange rate saved. Add rates on the Net
+          worth page.
+        </WarningBanner>
+      )}
 
       {chosen && baseline && (
         <>
@@ -117,7 +252,7 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
             </div>
             <div>
               <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                vs {strategy === "avalanche" ? "snowball" : "avalanche"}
+                vs {compareKey}
               </div>
               <div className="mt-1 text-xl font-bold tracking-tight nums">
                 {other
@@ -179,7 +314,12 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
               <tbody>
                 {chosen.debts.map((d) => (
                   <tr key={d.id} className="border-t border-slate-100">
-                    <td className="py-2">{d.name}</td>
+                    <td className="py-2">
+                      {d.name}
+                      {d.currency && d.currency !== currency && (
+                        <span className="ml-1.5 text-xs text-slate-400">{d.currency}</span>
+                      )}
+                    </td>
                     <td className="py-2 text-right nums">{d.payoff_date ?? "never at this budget"}</td>
                     <td className="py-2 text-right nums">{fmtMoney(d.interest_paid, currency)}</td>
                   </tr>
@@ -187,6 +327,78 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
               </tbody>
             </table>
           </div>
+
+          {strategy === "optimal" && schedule.length > 0 && (
+            <div className="mt-5">
+              <div className="flex items-baseline justify-between gap-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Monthly payment schedule
+                </h3>
+                {schedule.length > 24 && (
+                  <button
+                    onClick={() => setShowFullSchedule((s) => !s)}
+                    className="text-xs font-medium text-brand-600 hover:underline"
+                  >
+                    {showFullSchedule ? "Show first 24 months" : `Show all ${schedule.length} months`}
+                  </button>
+                )}
+              </div>
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="py-2 text-left font-medium">Month</th>
+                      {chosen.debts.map((d) => (
+                        <th key={d.id} className="py-2 text-right font-medium">
+                          {d.name}
+                          <span className="block text-[10px] font-normal normal-case text-slate-400">
+                            {/* Amounts are display-denominated (converted once at
+                                plan start) — foreign debts note their own currency. */}
+                            {d.currency && d.currency !== currency
+                              ? `${d.currency} → ${currency}`
+                              : currency}
+                          </span>
+                        </th>
+                      ))}
+                      {hasUncommitted && (
+                        <th className="py-2 text-right font-medium">
+                          Uncommitted
+                          <span className="block text-[10px] font-normal normal-case text-slate-400">
+                            {currency}
+                          </span>
+                        </th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleSchedule.map((m) => {
+                      const byDebt = new Map(m.payments.map((p) => [p.debt_id, p.amount]));
+                      return (
+                        <tr key={m.month} className="border-t border-slate-100">
+                          <td className="py-1.5 nums">{m.month.slice(0, 7)}</td>
+                          {chosen.debts.map((d) => (
+                            <td key={d.id} className="py-1.5 text-right nums">
+                              {byDebt.has(d.id) ? fmtMoney(byDebt.get(d.id), currency) : "—"}
+                            </td>
+                          ))}
+                          {hasUncommitted && (
+                            <td className="py-1.5 text-right nums text-slate-500">
+                              {toNum(m.uncommitted) > 0 ? fmtMoney(m.uncommitted, currency) : "—"}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {!showFullSchedule && schedule.length > 24 && (
+                  <div className="mt-1 text-xs text-slate-400">
+                    Showing the first 24 of {schedule.length} months.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {chosen.assumptions.length > 0 && (
             <div className="mt-3 text-xs text-slate-400">
@@ -204,22 +416,32 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
 export default function Debts() {
   const qc = useQueryClient();
   const currency = useUserCurrency();
+  const accountCurrencies = useAccountCurrencyMap();
   const summary = useQuery({
     queryKey: ["debt-summary"],
     queryFn: async () => (await api.get<DebtSummary>("/api/v1/debts/summary")).data,
   });
+  const [error, setError] = useState<string | null>(null);
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["debt-summary"] });
     qc.invalidateQueries({ queryKey: ["debt-plan"] });
   };
   const create = useMutation({
-    mutationFn: async (payload: Partial<Debt>) => (await api.post("/api/v1/debts", payload)).data,
-    onSuccess: invalidate,
+    mutationFn: async (payload: DebtPayload) => (await api.post("/api/v1/debts", payload)).data,
+    onSuccess: () => {
+      setError(null);
+      invalidate();
+    },
+    onError: (err) => setError(apiError(err)),
   });
   const update = useMutation({
-    mutationFn: async (vars: { id: number; current_balance: string }) =>
-      (await api.patch(`/api/v1/debts/${vars.id}`, { current_balance: vars.current_balance })).data,
-    onSuccess: invalidate,
+    mutationFn: async ({ id, ...body }: { id: number } & DebtPayload) =>
+      (await api.patch(`/api/v1/debts/${id}`, body)).data,
+    onSuccess: () => {
+      setError(null);
+      invalidate();
+    },
+    onError: (err) => setError(apiError(err)),
   });
   const remove = useMutation({
     mutationFn: async (id: number) => api.delete(`/api/v1/debts/${id}`),
@@ -227,57 +449,142 @@ export default function Debts() {
   });
 
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [name, setName] = useState("");
+  const [repaymentType, setRepaymentType] = useState<DebtRepaymentType>("revolving");
+  const [debtCurrency, setDebtCurrency] = useState("");
   const [original, setOriginal] = useState("0");
   const [current, setCurrent] = useState("0");
   const [apr, setApr] = useState("");
   const [promoApr, setPromoApr] = useState("");
   const [promoEnds, setPromoEnds] = useState("");
   const [minPay, setMinPay] = useState("");
+  const [installment, setInstallment] = useState("");
+  const [endsOn, setEndsOn] = useState("");
   const [dueDay, setDueDay] = useState("");
+
+  // Installment supersedes the minimum payment for the fixed-installment types.
+  const isFixed = repaymentType !== "revolving";
+  const showApr = repaymentType !== "statement_only"; // statement-only infers its rate
+  const showPromo = repaymentType === "revolving";
+
+  const currencyOptions = Array.from(
+    new Set([
+      ...Array.from(accountCurrencies.values()),
+      ...COMMON_CURRENCIES,
+      ...(debtCurrency ? [debtCurrency] : []),
+    ]),
+  ).sort();
+
+  function resetForm() {
+    setEditingId(null);
+    setName("");
+    setRepaymentType("revolving");
+    setDebtCurrency("");
+    setOriginal("0");
+    setCurrent("0");
+    setApr("");
+    setPromoApr("");
+    setPromoEnds("");
+    setMinPay("");
+    setInstallment("");
+    setEndsOn("");
+    setDueDay("");
+  }
+
+  function startEdit(d: Debt) {
+    setEditingId(d.id);
+    setName(d.name);
+    setRepaymentType(d.repayment_type);
+    // Pre-select the saved currency only when set — "" keeps submitting null.
+    setDebtCurrency(d.currency ?? "");
+    setOriginal(d.original_principal);
+    setCurrent(d.current_balance);
+    setApr(d.interest_rate_apr ?? "");
+    setPromoApr(d.promo_apr ?? "");
+    setPromoEnds(d.promo_ends_on ?? "");
+    setMinPay(d.minimum_payment ?? "");
+    setInstallment(d.installment_amount ?? "");
+    setEndsOn(d.ends_on ?? "");
+    setDueDay(d.due_day_of_month != null ? String(d.due_day_of_month) : "");
+    setError(null);
+    setShowForm(true);
+  }
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    create.mutate(
-      {
-        name,
-        original_principal: original as unknown as string,
-        current_balance: current as unknown as string,
-        interest_rate_apr: apr ? (apr as unknown as string) : null,
-        promo_apr: promoApr ? (promoApr as unknown as string) : null,
-        promo_ends_on: promoEnds || null,
-        minimum_payment: minPay ? (minPay as unknown as string) : null,
-        due_day_of_month: dueDay ? Number(dueDay) : null,
+    // Hidden fields submit null — the form is the source of truth for a save.
+    const payload: DebtPayload = {
+      name,
+      repayment_type: repaymentType,
+      currency: debtCurrency || null,
+      original_principal: original || "0",
+      current_balance: current || "0",
+      interest_rate_apr: showApr && apr ? apr : null,
+      promo_apr: showPromo && promoApr ? promoApr : null,
+      promo_ends_on: showPromo && promoEnds ? promoEnds : null,
+      minimum_payment: !isFixed && minPay ? minPay : null,
+      installment_amount: isFixed && installment ? installment : null,
+      ends_on: isFixed && endsOn ? endsOn : null,
+      due_day_of_month: dueDay ? Number(dueDay) : null,
+    };
+    const done = {
+      onSuccess: () => {
+        resetForm();
+        setShowForm(false);
       },
-      {
-        onSuccess: () => {
-          setName(""); setOriginal("0"); setCurrent("0"); setApr("");
-          setPromoApr(""); setPromoEnds(""); setMinPay(""); setDueDay("");
-          setShowForm(false);
-        },
-      },
-    );
+    };
+    if (editingId != null) update.mutate({ id: editingId, ...payload }, done);
+    else create.mutate(payload, done);
   }
 
+  const items = summary.data?.by_debt ?? [];
+  // Pay-down arithmetic only makes sense within one currency — foreign-currency
+  // debts are counted in total_owed by the backend (converted) but stay out of
+  // the original-vs-current progress math here.
+  const displayItems = items.filter((d) => !d.currency || d.currency === currency);
+  const foreignCount = items.length - displayItems.length;
   const totalOwed = toNum(summary.data?.total_owed);
-  const totalOriginal = (summary.data?.by_debt ?? []).reduce(
-    (acc, d) => acc + toNum(d.original_principal),
-    0,
-  );
-  const paidDownPct = totalOriginal > 0 ? 1 - totalOwed / totalOriginal : 0;
+  const displayOwed = displayItems.reduce((acc, d) => acc + toNum(d.current_balance), 0);
+  const totalOriginal = displayItems.reduce((acc, d) => acc + toNum(d.original_principal), 0);
+  const paidDownPct = totalOriginal > 0 ? 1 - displayOwed / totalOriginal : 0;
 
   return (
     <>
       <PageHeader
         title="Debts"
-        subtitle={`${summary.data?.by_debt.length ?? 0} obligations · ${fmtMoney(totalOwed, currency)} owed`}
+        subtitle={`${items.length} obligations · ${fmtMoney(totalOwed, currency)} owed`}
         right={
-          <Button onClick={() => setShowForm((s) => !s)}>
+          <Button
+            onClick={() => {
+              if (showForm) {
+                setShowForm(false);
+                resetForm();
+              } else {
+                resetForm();
+                setShowForm(true);
+              }
+            }}
+          >
             <Plus className="h-4 w-4" />
             {showForm ? "Cancel" : "Add debt"}
           </Button>
         }
       />
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {(summary.data?.excluded_currencies.length ?? 0) > 0 && (
+        <WarningBanner className="mb-4">
+          Debts in {summary.data?.excluded_currencies.join(", ")} are{" "}
+          <strong>excluded from the totals</strong> — no exchange rate saved. Add rates on the Net
+          worth page.
+        </WarningBanner>
+      )}
 
       <Card className="p-6">
         <div className="flex items-baseline justify-between">
@@ -286,7 +593,7 @@ export default function Debts() {
               Pay-down progress
             </div>
             <div className="mt-1 text-2xl font-bold tracking-tight nums">
-              {fmtMoney(totalOriginal - totalOwed, currency)}{" "}
+              {fmtMoney(totalOriginal - displayOwed, currency)}{" "}
               <span className="text-base font-medium text-slate-400">
                 of {fmtMoney(totalOriginal, currency)} paid
               </span>
@@ -295,55 +602,108 @@ export default function Debts() {
           <Badge tone="brand">{Math.round(paidDownPct * 100)}%</Badge>
         </div>
         <ProgressBar value={paidDownPct} tone="emerald" className="mt-4" />
+        {foreignCount > 0 && (
+          <div className="mt-2 text-xs text-slate-400">
+            Progress covers {currency}-denominated debts; {foreignCount} in other currencies not
+            included.
+          </div>
+        )}
       </Card>
 
       {showForm && (
         <Card className="mt-6 p-6">
-          <h2 className="mb-4 text-sm font-semibold text-slate-900">New debt</h2>
+          <h2 className="mb-4 text-sm font-semibold text-slate-900">
+            {editingId != null ? "Edit debt" : "New debt"}
+          </h2>
           <form onSubmit={onSubmit} className="grid grid-cols-1 gap-3 md:grid-cols-4">
             <label className="md:col-span-2">
               <Label>Name</Label>
               <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Visa card" />
             </label>
-            <label>
-              <Label>Original</Label>
-              <Input value={original} onChange={(e) => setOriginal(e.target.value)} />
+            <label className="md:col-span-2">
+              <Label>Repayment type</Label>
+              <Select
+                value={repaymentType}
+                onChange={(e) => setRepaymentType(e.target.value as DebtRepaymentType)}
+              >
+                {(Object.keys(TYPE_LABELS) as DebtRepaymentType[]).map((t) => (
+                  <option key={t} value={t}>
+                    {TYPE_LABELS[t]}
+                  </option>
+                ))}
+              </Select>
+              <span className="mt-1 block text-xs text-slate-400">{TYPE_HELP[repaymentType]}</span>
             </label>
             <label>
-              <Label>Current balance</Label>
+              <Label>Original principal{repaymentType === "flat" ? " (required)" : ""}</Label>
+              <Input required={repaymentType === "flat"} value={original} onChange={(e) => setOriginal(e.target.value)} />
+            </label>
+            <label>
+              <Label>Current balance{repaymentType === "statement_only" ? " (required)" : ""}</Label>
               <Input value={current} onChange={(e) => setCurrent(e.target.value)} />
             </label>
             <label>
-              <Label>APR %</Label>
-              <Input value={apr} onChange={(e) => setApr(e.target.value)} />
-            </label>
-            <label>
-              <Label>Promo APR % (0% offers)</Label>
-              <Input value={promoApr} onChange={(e) => setPromoApr(e.target.value)} placeholder="e.g. 0" />
-            </label>
-            <label>
-              <Label>Promo ends</Label>
-              <Input type="date" value={promoEnds} onChange={(e) => setPromoEnds(e.target.value)} />
-            </label>
-            <label>
-              <Label>Min payment</Label>
-              <Input value={minPay} onChange={(e) => setMinPay(e.target.value)} />
+              <Label>Currency</Label>
+              <Select value={debtCurrency} onChange={(e) => setDebtCurrency(e.target.value)}>
+                <option value="">Same as display currency ({currency})</option>
+                {currencyOptions.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </Select>
             </label>
             <label>
               <Label>Due day</Label>
               <Input value={dueDay} onChange={(e) => setDueDay(e.target.value)} placeholder="1–31" />
             </label>
+            {showApr && (
+              <label>
+                <Label>{repaymentType === "flat" ? "APR % (on original principal)" : "APR %"}</Label>
+                <Input value={apr} onChange={(e) => setApr(e.target.value)} />
+              </label>
+            )}
+            {showPromo && (
+              <>
+                <label>
+                  <Label>Promo APR % (0% offers)</Label>
+                  <Input value={promoApr} onChange={(e) => setPromoApr(e.target.value)} placeholder="e.g. 0" />
+                </label>
+                <label>
+                  <Label>Promo ends</Label>
+                  <Input type="date" value={promoEnds} onChange={(e) => setPromoEnds(e.target.value)} />
+                </label>
+              </>
+            )}
+            {!isFixed && (
+              <label>
+                <Label>Min payment</Label>
+                <Input value={minPay} onChange={(e) => setMinPay(e.target.value)} />
+              </label>
+            )}
+            {isFixed && (
+              <>
+                <label>
+                  <Label>Installment / month (required)</Label>
+                  <Input required value={installment} onChange={(e) => setInstallment(e.target.value)} />
+                </label>
+                <label>
+                  <Label>End date (required)</Label>
+                  <Input type="date" required value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
+                </label>
+              </>
+            )}
             <div className="md:col-span-4">
-              <Button type="submit">Save debt</Button>
+              <Button type="submit">{editingId != null ? "Save changes" : "Save debt"}</Button>
             </div>
           </form>
         </Card>
       )}
 
-      <PlannerPanel currency={currency} hasDebts={(summary.data?.by_debt.length ?? 0) > 0} />
+      <PlannerPanel currency={currency} hasDebts={items.length > 0} />
 
       <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
-        {summary.data?.by_debt.length === 0 && (
+        {items.length === 0 && (
           <div className="md:col-span-2">
             <EmptyState
               icon={<CreditCard className="h-5 w-5" />}
@@ -352,19 +712,22 @@ export default function Debts() {
             />
           </div>
         )}
-        {summary.data?.by_debt.map((d) => {
-          const original = toNum(d.original_principal);
+        {items.map((d) => {
+          const dCcy = d.currency ?? currency;
+          const originalAmt = toNum(d.original_principal);
           const cur = toNum(d.current_balance);
-          const paid = Math.max(0, original - cur);
-          const progress = original > 0 ? paid / original : 0;
+          const paid = Math.max(0, originalAmt - cur);
+          const progress = originalAmt > 0 ? paid / originalAmt : 0;
           const promoActive =
             d.promo_apr !== null && d.promo_ends_on !== null && d.promo_ends_on >= new Date().toISOString().slice(0, 10);
           return (
             <Card key={d.id} className="p-5 transition hover:shadow-card-hover">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h3 className="truncate font-semibold text-slate-900">{d.name}</h3>
+                    <Badge tone="slate">{TYPE_LABELS[d.repayment_type]}</Badge>
+                    {d.repayment_type === "statement_only" && <Badge tone="amber">estimated</Badge>}
                     {promoActive ? (
                       <Badge tone="amber">
                         <TrendingDown className="h-3 w-3" />
@@ -379,26 +742,48 @@ export default function Debts() {
                     )}
                   </div>
                   <div className="mt-1 flex items-baseline gap-2">
-                    <span className="text-xl font-bold tracking-tight nums">{fmtMoney(cur, currency)}</span>
-                    <span className="text-xs text-slate-500 nums">of {fmtMoney(original, currency)}</span>
+                    <span className="text-xl font-bold tracking-tight nums">{fmtMoney(cur, dCcy)}</span>
+                    <span className="text-xs text-slate-500 nums">of {fmtMoney(originalAmt, dCcy)}</span>
                   </div>
+                  {!d.converted && (
+                    <div className="mt-1">
+                      <Badge tone="amber">no rate — excluded from totals</Badge>
+                    </div>
+                  )}
                 </div>
-                <button
-                  onClick={() => remove.mutate(d.id)}
-                  className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
-                  title="Delete"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                <div className="flex shrink-0 gap-1">
+                  <button
+                    onClick={() => startEdit(d)}
+                    className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                    title="Edit"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => remove.mutate(d.id)}
+                    className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                    title="Delete"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
 
               <ProgressBar value={progress} tone="emerald" className="mt-4" />
 
               <div className="mt-4 grid grid-cols-3 gap-3 border-t border-slate-100 pt-3 text-xs">
                 <div>
-                  <div className="text-slate-500">Min pay</div>
+                  <div className="text-slate-500">
+                    {d.repayment_type === "revolving" ? "Min pay" : "Installment"}
+                  </div>
                   <div className="mt-0.5 font-medium nums">
-                    {d.minimum_payment ? fmtMoney(d.minimum_payment, currency) : "—"}
+                    {d.repayment_type === "revolving"
+                      ? d.minimum_payment
+                        ? fmtMoney(d.minimum_payment, dCcy)
+                        : "—"
+                      : d.installment_amount
+                        ? fmtMoney(d.installment_amount, dCcy)
+                        : "—"}
                   </div>
                 </div>
                 <div>

@@ -104,6 +104,8 @@ export interface Transaction {
   external_id: string | null;
 }
 
+export type DebtRepaymentType = "revolving" | "amortized" | "flat" | "statement_only";
+
 export interface Debt {
   id: number;
   name: string;
@@ -114,6 +116,9 @@ export interface Debt {
   promo_apr: string | null;
   promo_ends_on: string | null;
   minimum_payment: string | null;
+  repayment_type: DebtRepaymentType;
+  currency: string | null; // null = the user's display currency
+  installment_amount: string | null;
   due_day_of_month: number | null;
   starts_on: string | null;
   ends_on: string | null;
@@ -125,6 +130,9 @@ export interface DebtPlanDebt {
   name: string;
   payoff_date: string | null;
   interest_paid: string;
+  // The debt's own currency (null = display currency). Simulation figures are
+  // display-denominated — converted once at plan start.
+  currency: string | null;
 }
 
 export interface PromoCliff {
@@ -134,6 +142,18 @@ export interface PromoCliff {
   balance_at_expiry: string;
   reverting_apr: string;
   extra_yearly_interest: string;
+}
+
+export interface SchedulePayment {
+  debt_id: number;
+  amount: string;
+}
+
+export interface ScheduleMonth {
+  month: string;
+  payments: SchedulePayment[];
+  // Budget the month couldn't place: only flat loans still open, or all cleared.
+  uncommitted: string;
 }
 
 export interface DebtPlan {
@@ -150,12 +170,17 @@ export interface DebtPlan {
   promo_cliffs: PromoCliff[];
   assumptions: string[];
   unpayable: boolean;
+  // Per-debt monthly payments — populated only for the optimal plan.
+  schedule: ScheduleMonth[];
 }
 
 export interface DebtPlanCompare {
   minimum: DebtPlan;
   snowball: DebtPlan;
   avalanche: DebtPlan;
+  optimal: DebtPlan;
+  // Debt currencies with no saved FX rate — those debts sit outside every plan.
+  excluded_currencies: string[];
 }
 
 export interface RecurringItem {
@@ -266,9 +291,17 @@ export interface AccountCoverage {
   last_snapshot_on: string | null;
 }
 
+export interface DebtSummaryItem extends Debt {
+  // False = foreign-currency balance with no saved FX rate — listed raw but
+  // excluded from total_owed.
+  converted: boolean;
+}
+
 export interface DebtSummary {
+  // Display-currency total over convertible debts only.
   total_owed: string;
-  by_debt: Debt[];
+  by_debt: DebtSummaryItem[];
+  excluded_currencies: string[];
 }
 
 export interface BudgetMonthCell {
