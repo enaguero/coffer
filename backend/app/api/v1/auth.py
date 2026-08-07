@@ -17,9 +17,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/hour")
-def signup(
-    request: Request, response: Response, payload: SignupRequest, db: DbSession
-) -> TokenResponse:
+def signup(request: Request, response: Response, payload: SignupRequest, db: DbSession) -> TokenResponse:
     existing = db.scalar(select(User).where(User.email == payload.email))
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -73,7 +71,9 @@ def update_me(payload: UserSettingsUpdate, current: CurrentUser, db: DbSession) 
     if "display_currency" in data and data["display_currency"] != current.display_currency:
         # Saved rates mean "1 unit = X of the OLD display currency" — reusing
         # them against a new target would silently corrupt every converted
-        # total, so a display change wipes them (the UI says so).
+        # total, so a display change wipes them (the UI says so). Fetched
+        # ("auto") rows go too; the next enabled read refetches them against
+        # the new base.
         db.execute(delete(FxRate).where(FxRate.user_id == current.id))
     for key, value in data.items():
         setattr(current, key, value)

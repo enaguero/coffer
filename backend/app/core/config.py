@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     # (including unset) is treated as production and refuses to boot with a weak secret.
     coffer_env: str = "production"
 
+    # FX feed base URL for the opt-in auto-refresh (services/fx_feed.py) —
+    # "{fx_feed_url}/{base}" must return the ExchangeRate-API open-endpoint
+    # shape. Default: the keyless open endpoint (CLP coverage verified);
+    # point at a self-hosted Frankfurter to stay fully offline.
+    fx_feed_url: str = "https://open.er-api.com/v6/latest"
+
     # Weekly digest email (optional). Unset SMTP_HOST disables sending; the
     # in-app preview endpoint works regardless. Digests go to each user's own
     # login email. Send via cron: `docker compose exec backend uv run python -m app.digest`
