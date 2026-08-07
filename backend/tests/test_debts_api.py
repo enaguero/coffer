@@ -10,6 +10,16 @@ def _create_debt(client, headers, **fields) -> dict:
     return client.post("/api/v1/debts", headers=headers, json=payload)
 
 
+def _create_account(client, headers, name: str = "Linked account") -> int:
+    r = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"name": name, "type": "checking", "currency": "GBP"},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
 def test_create_revolving_defaults(auth_client) -> None:
     """Today's shape keeps working: no new fields required for revolving."""
     client, headers, _ = auth_client
@@ -141,6 +151,75 @@ def test_bad_currency_code_rejected(auth_client) -> None:
         assert r.status_code == 422, f"{bad!r}: {r.text}"
 
 
+def test_apr_bounds_rejected_at_the_edge(auth_client) -> None:
+    """The APR columns are Numeric(6, 3): out-of-range values must 422 at
+    validation, not 500 at insert — on create AND on PATCH."""
+    client, headers, _ = auth_client
+    for field in ("interest_rate_apr", "promo_apr"):
+        for bad in ("1000", "-0.1"):
+            r = _create_debt(client, headers, current_balance="100.00", **{field: bad})
+            assert r.status_code == 422, f"create {field}={bad}: {r.text}"
+            assert field in r.text
+
+    r = _create_debt(client, headers, current_balance="100.00")
+    assert r.status_code == 201, r.text
+    debt_id = r.json()["id"]
+    for field in ("interest_rate_apr", "promo_apr"):
+        for bad in ("1000", "-0.1"):
+            r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={field: bad})
+            assert r.status_code == 422, f"patch {field}={bad}: {r.text}"
+
+    # The boundary value itself is storable and accepted.
+    r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={"interest_rate_apr": "999.999"})
+    assert r.status_code == 200, r.text
+
+
+def test_link_other_users_account_404s(auth_client) -> None:
+    """account_id must belong to the current user — a foreign id 404s exactly
+    like a missing one, on create and on PATCH."""
+    client, headers, _ = auth_client
+    r = client.post("/api/v1/auth/signup", json={"email": "debt-other@coffer.dev", "password": "other-pw-1234"})
+    assert r.status_code == 201, r.text
+    # Signup sets a session cookie, and cookie auth outranks the Bearer
+    # header — clear it so each request's Authorization header decides who
+    # is calling.
+    client.cookies.clear()
+    other_headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    foreign_id = _create_account(client, other_headers, name="Foreign account")
+
+    r = _create_debt(client, headers, current_balance="100.00", account_id=foreign_id)
+    assert r.status_code == 404, r.text
+
+    r = _create_debt(client, headers, current_balance="100.00")
+    assert r.status_code == 201, r.text
+    debt_id = r.json()["id"]
+    r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={"account_id": foreign_id})
+    assert r.status_code == 404, r.text
+    # The failed PATCH must not have half-applied.
+    listed = client.get("/api/v1/debts", headers=headers).json()
+    assert next(d for d in listed if d["id"] == debt_id)["account_id"] is None
+
+
+def test_link_account_already_linked_409s(auth_client) -> None:
+    """One debt per account: the unique violation surfaces as a clear 409,
+    never a 500 — on create and on PATCH."""
+    client, headers, _ = auth_client
+    account_id = _create_account(client, headers)
+    r = _create_debt(client, headers, name="First", current_balance="100.00", account_id=account_id)
+    assert r.status_code == 201, r.text
+
+    r = _create_debt(client, headers, name="Second", current_balance="200.00", account_id=account_id)
+    assert r.status_code == 409, r.text
+    assert "already linked" in r.json()["detail"]
+
+    r = _create_debt(client, headers, name="Third", current_balance="300.00")
+    assert r.status_code == 201, r.text
+    debt_id = r.json()["id"]
+    r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={"account_id": account_id})
+    assert r.status_code == 409, r.text
+    assert "already linked" in r.json()["detail"]
+
+
 def test_patch_to_amortized_enforces_required_fields(auth_client) -> None:
     """Switching type via a partial PATCH must validate the merged debt."""
     client, headers, _ = auth_client
@@ -151,6 +230,11 @@ def test_patch_to_amortized_enforces_required_fields(auth_client) -> None:
     r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={"repayment_type": "amortized"})
     assert r.status_code == 422
     assert "installment_amount" in r.text
+    # PATCH 422s are list-shaped like create's pydantic ones — one extraction
+    # path client-side.
+    detail = r.json()["detail"]
+    assert isinstance(detail, list)
+    assert "installment_amount" in detail[0]["msg"]
 
     # The failed PATCH must not have half-applied: the debt is still revolving.
     listed = client.get("/api/v1/debts", headers=headers).json()

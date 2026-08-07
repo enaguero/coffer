@@ -512,15 +512,27 @@ export default function NetWorth() {
                         {newestAsOf ? ` from ${newestAsOf}` : ""}.
                       </p>
                     )}
-                    {/* A 200 with zero rows written means the feed skipped
-                        (failure cooldown) or fetched nothing usable — don't
-                        let the click look like it worked. */}
-                    {refreshRates.isSuccess && refreshRates.data.refreshed_count === 0 && (
+                    {/* A 200 with zero rows written carries skipped_reason
+                        saying why — don't let the click look like it worked. */}
+                    {refreshRates.isSuccess && refreshRates.data.skipped_reason === "provider_error" && (
                       <p className="mt-1 text-xs text-amber-600">
-                        Nothing refreshed — showing last-known rates
+                        Provider unreachable — showing last-known rates
                         {newestAsOf ? ` from ${newestAsOf}` : ""}.
                       </p>
                     )}
+                    {refreshRates.isSuccess && refreshRates.data.skipped_reason === "cooldown" && (
+                      <p className="mt-1 text-xs text-amber-600">
+                        Recently failed — retry in a few minutes.
+                      </p>
+                    )}
+                    {refreshRates.isSuccess &&
+                      refreshRates.data.refreshed_count === 0 &&
+                      !refreshRates.data.skipped_reason && (
+                        <p className="mt-1 text-xs text-amber-600">
+                          Nothing refreshed — showing last-known rates
+                          {newestAsOf ? ` from ${newestAsOf}` : ""}.
+                        </p>
+                      )}
                   </div>
                 )}
               </div>

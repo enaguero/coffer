@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Literal
 
 import httpx
 from sqlalchemy import func, select
@@ -119,6 +121,17 @@ def _is_stale(needed: set[str], auto_rows: list[FxRate]) -> bool:
     return newest is None or date.today() - newest >= AUTO_MAX_AGE
 
 
+@dataclass(frozen=True)
+class RefreshResult:
+    """What a refresh attempt did: rows written, and — when it wrote nothing
+    because the feed was suppressed or failed — why. `skipped_reason` is None
+    on success AND on benign no-ops (nothing needed, rates fresh), so a 0
+    with no reason means "there was nothing to do", not "something broke"."""
+
+    written: int
+    skipped_reason: Literal["cooldown", "provider_error"] | None = None
+
+
 def refresh_user_rates(
     db: Session,
     user: User,
@@ -129,14 +142,32 @@ def refresh_user_rates(
 ) -> int:
     """Upsert auto rows for the in-use currencies not covered by manual rates.
 
-    Returns the number of rows written. No-ops (returning 0) unless the user
-    opted in; also when there is no display currency to quote against, every
-    needed currency is manual, auto rates are fresh (unless `force`), or the
-    failure cooldown is active (`force` does NOT bypass the cooldown).
+    Returns the number of rows written — the int-only contract the read
+    endpoints (GET /fx, networth) rely on; POST /fx/refresh uses
+    `refresh_user_rates_detailed` to also learn WHY nothing was written.
+    """
+    return refresh_user_rates_detailed(db, user, currencies_in_use, display_currency, force=force).written
+
+
+def refresh_user_rates_detailed(
+    db: Session,
+    user: User,
+    currencies_in_use: set[str],
+    display_currency: str | None,
+    *,
+    force: bool = False,
+) -> RefreshResult:
+    """`refresh_user_rates` plus the skip signal (see RefreshResult).
+
+    No-ops (written=0) unless the user opted in; also when there is no
+    display currency to quote against, every needed currency is manual, auto
+    rates are fresh (unless `force`), or the failure cooldown is active
+    (`force` does NOT bypass the cooldown — reason "cooldown").
 
     Never raises: read endpoints call this bare, so ANY failure — fetch,
     payload shape, even an unexpected bug — leaves existing rows untouched,
-    starts the cooldown, and returns 0 instead of failing the request.
+    starts the cooldown, and reports reason "provider_error" instead of
+    failing the request.
     """
     try:
         return _refresh_user_rates(db, user, currencies_in_use, display_currency, force=force)
@@ -150,7 +181,7 @@ def refresh_user_rates(
             logger.warning("FX refresh rollback failed for user %s", user.id, exc_info=True)
         logger.warning("FX refresh failed for user %s: %s", user.id, exc)
         _failure_cooldowns[user.id] = time.monotonic()
-        return 0
+        return RefreshResult(0, "provider_error")
 
 
 def _refresh_user_rates(
@@ -160,28 +191,42 @@ def _refresh_user_rates(
     display_currency: str | None,
     *,
     force: bool,
-) -> int:
+) -> RefreshResult:
     if not user.fx_auto_refresh or not display_currency:
-        return 0
+        return RefreshResult(0)
     needed = {c for c in currencies_in_use if c != display_currency}
     if not needed:
-        return 0
+        return RefreshResult(0)
     rows = list(db.scalars(select(FxRate).where(FxRate.user_id == user.id, FxRate.currency.in_(needed))))
     # Manual rates always win — their currencies never trigger a fetch.
     needed -= {r.currency for r in rows if r.source == "manual"}
     if not needed:
-        return 0
+        return RefreshResult(0)
     if not force and not _is_stale(needed, [r for r in rows if r.source == "auto"]):
-        return 0
+        return RefreshResult(0)
     last_failure = _failure_cooldowns.get(user.id)
     if last_failure is not None and time.monotonic() - last_failure < FAILURE_COOLDOWN_SECONDS:
-        return 0
+        return RefreshResult(0, "cooldown")
+    # The provider call below can take seconds; a display-currency change
+    # committed meanwhile (PATCH /auth/me — which also wipes saved rates)
+    # would leave these values quoted against the wrong base. Capture the
+    # stored setting now with a fresh SELECT (the ORM instance may be stale)
+    # so it can be re-checked after the fetch.
+    base_at_fetch = db.scalar(select(User.display_currency).where(User.id == user.id))
     # A FxFeedError here propagates to the wrapper above, which records the
     # failure cooldown.
     fetched = fetch_rates(display_currency, needed)
     _failure_cooldowns.pop(user.id, None)
+    base_now = db.scalar(select(User.display_currency).where(User.id == user.id))
+    if base_now != base_at_fetch or (base_now is not None and base_now != display_currency):
+        # The display currency changed under us: these rates are quoted
+        # against the OLD base — abort with no writes and no cooldown (the
+        # provider did nothing wrong). A change that commits between this
+        # check and the commit below can still slip through — accepted for
+        # this single-process app.
+        return RefreshResult(0)
     if not fetched:
-        return 0
+        return RefreshResult(0)
     stmt = pg_insert(FxRate).values(
         [
             {"user_id": user.id, "currency": code, "rate": rate, "as_of": date.today(), "source": "auto"}
@@ -206,4 +251,4 @@ def _refresh_user_rates(
     # return nothing.
     written = len(db.execute(stmt.returning(FxRate.id)).all())
     db.commit()
-    return written
+    return RefreshResult(written)

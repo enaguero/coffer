@@ -4,8 +4,10 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.deps import CurrentUser, DbSession
+from app.models.account import Account
 from app.models.debt import Debt
 from app.schemas.debt import (
     DebtCreate,
@@ -146,11 +148,33 @@ def plan_payoff(payload: PlanRequest, current: CurrentUser, db: DbSession) -> Pl
     )
 
 
+def _check_account_owned(db, current, account_id: int) -> None:
+    """404 unless the linked account exists AND belongs to the current user —
+    mirrors _get_owned so a foreign id is indistinguishable from a missing one."""
+    account = db.get(Account, account_id)
+    if account is None or account.user_id != current.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+
+def _commit_or_409(db) -> None:
+    """Commit, mapping the one-debt-per-account unique violation to a 409."""
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That account is already linked to another debt",
+        ) from e
+
+
 @router.post("", response_model=DebtOut, status_code=status.HTTP_201_CREATED)
 def create_debt(payload: DebtCreate, current: CurrentUser, db: DbSession) -> Debt:
+    if payload.account_id is not None:
+        _check_account_owned(db, current, payload.account_id)
     debt = Debt(user_id=current.id, **payload.model_dump())
     db.add(debt)
-    db.commit()
+    _commit_or_409(db)
     db.refresh(debt)
     return debt
 
@@ -183,10 +207,17 @@ def update_debt(debt_id: int, payload: DebtUpdate, current: CurrentUser, db: DbS
         creating=False,  # updates may zero a statement_only balance (paid off)
     )
     if violation:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=violation)
+        # List-shaped detail so PATCH 422s look like create's pydantic ones —
+        # one client-side extraction path for both endpoints.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=[{"loc": ["body"], "msg": violation, "type": "value_error"}],
+        )
+    if updates.get("account_id") is not None:
+        _check_account_owned(db, current, updates["account_id"])
     for key, value in updates.items():
         setattr(debt, key, value)
-    db.commit()
+    _commit_or_409(db)
     db.refresh(debt)
     return debt
 

@@ -18,7 +18,8 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.deps import CurrentUser, DbSession
 from app.models.account import Account
@@ -26,7 +27,7 @@ from app.models.debt import Debt
 from app.models.fx_rate import RATE_MAX, RATE_QUANTUM, FxRate
 from app.models.user import User
 from app.services.account_loader import load_display_and_rates
-from app.services.fx_feed import refresh_user_rates
+from app.services.fx_feed import refresh_user_rates, refresh_user_rates_detailed
 
 router = APIRouter(prefix="/fx", tags=["fx"])
 
@@ -64,6 +65,11 @@ class FxRateOut(BaseModel):
 
 class FxRefreshOut(BaseModel):
     refreshed_count: int
+    # Why nothing was written, when the feed itself was the reason: "cooldown"
+    # (a recent failure suppressed the fetch) or "provider_error" (the fetch
+    # ran and failed). None on success — including a benign 0 where there was
+    # simply nothing to refresh.
+    skipped_reason: Literal["cooldown", "provider_error"] | None = None
     rates: list[FxRateOut]
 
 
@@ -101,23 +107,40 @@ def upsert_rates(payload: list[FxRateIn], current: CurrentUser, db: DbSession) -
     """Create or update rates by hand. Every row saved here becomes
     source="manual" — manual always wins: the auto feed never overwrites a
     manual row, and its currency never triggers a fetch again."""
-    # Last write wins for duplicate codes in one payload — the session doesn't
-    # autoflush, so looping adds for the same currency would 500 on commit.
+    # Last write wins for duplicate codes in one payload.
     by_currency = {item.currency: item for item in payload}
-    existing = {r.currency: r for r in _list_rates(db, current.id)}
-    for currency, item in by_currency.items():
-        # A rate without an explicit as-of date is "as of when it was saved".
-        as_of = item.as_of or date.today()
-        row = existing.get(currency)
-        if row is None:
-            db.add(FxRate(user_id=current.id, currency=currency, rate=item.rate, as_of=as_of, source="manual"))
-        else:
-            row.rate = item.rate
-            row.as_of = as_of
-            # A hand-entered value over a fetched one flips it to manual —
-            # from here on the feed leaves this currency alone.
-            row.source = "manual"
-    db.commit()
+    if by_currency:
+        stmt = pg_insert(FxRate).values(
+            [
+                {
+                    "user_id": current.id,
+                    "currency": currency,
+                    "rate": item.rate,
+                    # A rate without an explicit as-of date is "as of when it
+                    # was saved".
+                    "as_of": item.as_of or date.today(),
+                    "source": "manual",
+                }
+                for currency, item in sorted(by_currency.items())
+            ]
+        )
+        # ON CONFLICT rather than plain inserts: the opportunistic auto
+        # refresh can insert the same (user, currency) concurrently, and a
+        # racing plain insert would 500 on the unique constraint. Manual
+        # always wins, so an existing row — auto or manual — is overwritten
+        # unconditionally and flipped to manual: from here on the feed leaves
+        # this currency alone.
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_fx_rate_user_currency",
+            set_={
+                "rate": stmt.excluded.rate,
+                "as_of": stmt.excluded.as_of,
+                "source": "manual",
+                "updated_at": func.now(),
+            },
+        )
+        db.execute(stmt)
+        db.commit()
     return _list_rates(db, current.id)
 
 
@@ -125,16 +148,21 @@ def upsert_rates(payload: list[FxRateIn], current: CurrentUser, db: DbSession) -
 def refresh_rates(current: CurrentUser, db: DbSession) -> FxRefreshOut:
     """Explicit refresh — requires the fx_auto_refresh opt-in (400 without
     it). Bypasses the staleness check but NOT the failure cooldown — a
-    refreshed_count of 0 with auto rows present means the feed skipped
-    (cooldown) or failed; last-known rates keep serving either way."""
+    refreshed_count of 0 comes with `skipped_reason` saying whether the feed
+    skipped ("cooldown") or failed ("provider_error"); last-known rates keep
+    serving either way."""
     if not current.fx_auto_refresh:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Automatic FX refresh is not enabled — turn it on via PATCH /auth/me first",
         )
     currencies_in_use, display = _refresh_inputs(db, current)
-    refreshed = refresh_user_rates(db, current, currencies_in_use, display, force=True)
-    return FxRefreshOut(refreshed_count=refreshed, rates=_list_rates(db, current.id))
+    result = refresh_user_rates_detailed(db, current, currencies_in_use, display, force=True)
+    return FxRefreshOut(
+        refreshed_count=result.written,
+        skipped_reason=result.skipped_reason,
+        rates=_list_rates(db, current.id),
+    )
 
 
 @router.delete("/{currency}", status_code=status.HTTP_204_NO_CONTENT)

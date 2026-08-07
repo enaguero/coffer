@@ -30,6 +30,10 @@ export interface FxRefreshOut {
   // Rows actually written by this refresh; 0 with rates present means the
   // feed skipped (failure cooldown) or failed — last-known rates still serve.
   refreshed_count: number;
+  // Why nothing was written when the feed itself was the reason: a recent
+  // failure's cooldown suppressed the fetch, or the fetch ran and failed.
+  // null on success — including a benign 0 with nothing to refresh.
+  skipped_reason: "cooldown" | "provider_error" | null;
   rates: FxRate[];
 }
 

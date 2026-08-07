@@ -165,11 +165,14 @@ def test_manual_rate_never_overwritten_and_never_triggers_fetch(auth_client, mon
     assert rows["CLP"]["source"] == "manual"
     assert rows["EUR"]["source"] == "auto"
 
-    # PUT over the fetched EUR row flips it to manual...
+    # PUT over the fetched EUR row flips it to manual (the upsert lands ON
+    # CONFLICT on the same unique constraint the feed uses, so racing the
+    # feed's insert can never 500)...
     r = client.put("/api/v1/fx", headers=headers, json=[{"currency": "EUR", "rate": 0.9}])
     row = next(x for x in r.json() if x["currency"] == "EUR")
     assert row["source"] == "manual"
     assert Decimal(row["rate"]) == Decimal("0.9")
+    assert row["as_of"] == TODAY.isoformat()  # no explicit as_of -> saved today
 
     # ...and manual-only coverage means later reads fetch nothing at all.
     _rates_by_currency(client, headers)
@@ -327,7 +330,74 @@ def test_refresh_endpoint_bypasses_staleness_not_cooldown(auth_client, monkeypat
     assert Decimal(_rates_by_currency(client, headers)["CLP"]["rate"]) == Decimal("0.001")
 
 
+def test_refresh_endpoint_reports_skipped_reason(auth_client, monkeypatch) -> None:
+    """POST /fx/refresh says WHY nothing was written: "provider_error" when
+    the fetch ran and failed, "cooldown" when a recent failure suppressed it,
+    and None on a refresh that wrote rows."""
+    client, headers, _ = auth_client
+    _settings(client, headers, display_currency="GBP", fx_auto_refresh=True)
+    _add_account(client, headers, "GBP")
+    _add_account(client, headers, "CLP")
+
+    # Success writes rows and carries no reason.
+    _install_feed(monkeypatch, _payload({"CLP": 1250.0}))
+    body = client.post("/api/v1/fx/refresh", headers=headers).json()
+    assert body["refreshed_count"] == 1
+    assert body["skipped_reason"] is None
+
+    # The fetch ran and failed -> provider_error (and the cooldown starts).
+    fail_calls = _install_feed(monkeypatch, exc=httpx.ConnectError("provider down"))
+    body = client.post("/api/v1/fx/refresh", headers=headers).json()
+    assert body["refreshed_count"] == 0
+    assert body["skipped_reason"] == "provider_error"
+    assert len(fail_calls) == 1
+
+    # Within the cooldown no fetch is attempted -> cooldown.
+    body = client.post("/api/v1/fx/refresh", headers=headers).json()
+    assert body["refreshed_count"] == 0
+    assert body["skipped_reason"] == "cooldown"
+    assert len(fail_calls) == 1
+
+
 # ------------------------------------------- display-currency change wipe
+
+
+def test_display_change_mid_fetch_aborts_write(auth_client, monkeypatch, db_session) -> None:
+    """A display-currency change committed DURING the provider fetch must not
+    persist rates quoted against the old base: the refresh re-reads the stored
+    display currency after the fetch and aborts — no rows, no cooldown (the
+    provider did nothing wrong)."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.user import User
+
+    client, headers, user_id = auth_client
+    _settings(client, headers, display_currency="GBP", fx_auto_refresh=True)
+    _add_account(client, headers, "GBP")
+    _add_account(client, headers, "CLP")
+
+    calls: list[str] = []
+
+    def _get(url: str):
+        calls.append(url)
+        # The race: while the (multi-second) provider call is in flight,
+        # another request commits a display change (which also wipes rates).
+        db_session.execute(sa_update(User).where(User.id == user_id).values(display_currency="USD"))
+        return _FakeResponse(_payload({"CLP": 1250.0}))
+
+    monkeypatch.setattr(fx_feed, "_http_get", _get)
+
+    body = client.post("/api/v1/fx/refresh", headers=headers).json()
+    assert body["refreshed_count"] == 0
+    assert body["skipped_reason"] is None  # an abort, not a provider failure
+    assert body["rates"] == []
+    assert len(calls) == 1
+    # Nothing was written — GBP-quoted values never landed under the USD base.
+    assert db_session.scalars(select(FxRate).where(FxRate.user_id == user_id)).all() == []
+
+    # No cooldown was started: the next refresh attempts an outbound call.
+    client.post("/api/v1/fx/refresh", headers=headers)
+    assert len(calls) == 2
 
 
 def test_display_change_deletes_manual_and_auto_rows(auth_client, monkeypatch, db_session) -> None:

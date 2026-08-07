@@ -5,6 +5,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.debt import DebtRepaymentType
 
+# The DB column is Numeric(6, 3) — anything past 999.999 (or negative) would
+# 500 at insert, so the schemas reject it with a 422 instead.
+APR_MAX = Decimal("999.999")
+
 
 def _upper_currency(value: str | None) -> str | None:
     # Uppercased at the edge so FX conversion and display-currency filters
@@ -51,8 +55,8 @@ class DebtBase(BaseModel):
     account_id: int | None = None
     original_principal: Decimal = Decimal("0")
     current_balance: Decimal = Decimal("0")
-    interest_rate_apr: Decimal | None = None
-    promo_apr: Decimal | None = None
+    interest_rate_apr: Decimal | None = Field(default=None, ge=0, le=APR_MAX)
+    promo_apr: Decimal | None = Field(default=None, ge=0, le=APR_MAX)
     promo_ends_on: date | None = None
     minimum_payment: Decimal | None = None
     repayment_type: DebtRepaymentType = DebtRepaymentType.REVOLVING
@@ -87,8 +91,8 @@ class DebtUpdate(BaseModel):
     account_id: int | None = None
     original_principal: Decimal | None = None
     current_balance: Decimal | None = None
-    interest_rate_apr: Decimal | None = None
-    promo_apr: Decimal | None = None
+    interest_rate_apr: Decimal | None = Field(default=None, ge=0, le=APR_MAX)
+    promo_apr: Decimal | None = Field(default=None, ge=0, le=APR_MAX)
     promo_ends_on: date | None = None
     minimum_payment: Decimal | None = None
     repayment_type: DebtRepaymentType | None = None
