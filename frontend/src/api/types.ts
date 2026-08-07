@@ -14,12 +14,16 @@ export interface User {
   email: string;
   full_name: string | null;
   display_currency: string | null;
+  fx_auto_refresh: boolean;
 }
 
 export interface FxRate {
   currency: string;
   rate: string;
   as_of: string | null;
+  // "auto" rows come from the opt-in feed; a manual PUT flips them to "manual"
+  // and the feed never overwrites them again.
+  source: "manual" | "auto";
 }
 
 export type UkWrapper = "isa" | "lisa" | "pension";
@@ -240,7 +244,14 @@ export interface NetWorth {
   display_currency: string | null;
   excluded_currencies: string[];
   accounts: AccountBalanceInfo[];
-  register_debts: Array<{ id: number; name: string; balance: string }>;
+  register_debts: Array<{
+    id: number;
+    name: string;
+    balance: string; // in the debt's own currency
+    currency: string | null; // null = display currency by convention
+    converted: boolean; // false = no FX rate saved, excluded from totals
+    payoff_date: string | null; // at contractual minimums; null = never clears or unconvertible
+  }>;
   assets: string;
   liabilities: string;
   net: string;
