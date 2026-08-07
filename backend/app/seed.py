@@ -45,6 +45,7 @@ from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.services.analytics.debt_plan import add_months
 
 DEMO_EMAIL = "demo@coffer.dev"
 DEMO_PASSWORD = "demo1234"
@@ -128,12 +129,6 @@ def _dec(value: str | None) -> Decimal | None:
     return Decimal(value) if value is not None else None
 
 
-def _add_months(month_start: date, months: int) -> date:
-    """The 1st of the month `months` after (or before) `month_start`."""
-    total = month_start.year * 12 + month_start.month - 1 + months
-    return date(total // 12, total % 12 + 1, 1)
-
-
 def _clamped(month_start: date, day: int, today: date) -> date:
     """Day-of-month clamped to ≤28 and never in the future (this month's
     not-yet-due items post today, 'already made' — the original convention)."""
@@ -166,7 +161,9 @@ def seed(db: Session) -> None:
 
     today = date.today()
     month_start = today.replace(day=1)
-    months = [_add_months(month_start, offset) for offset in range(1 - HISTORY_MONTHS, 1)]
+    # add_months clamps the day to the target month's length — a no-op for the
+    # day-1 dates seeded here.
+    months = [add_months(month_start, offset) for offset in range(1 - HISTORY_MONTHS, 1)]
     # Month-end snapshot dates: the day before each seeded month begins — the
     # opening position plus the close of both fully-seeded months. All in the
     # past (the current month's own end hasn't happened yet).
@@ -251,6 +248,7 @@ def seed(db: Session) -> None:
     # ---- Debt accounts + Debt records + debt-payment categories
     # (name, account, category, monthly payment, due day, principal per month)
     payment_plan: list[tuple[str, Account, Category, Decimal, int, Decimal]] = []
+    total_commit = Decimal("0")  # accumulated per debt — the 40% invariant printed at the end
     for dname, rtype, acct_type, ccy, balance_s, principal_s, apr_s, min_pay_s, installment_s, due, ends_in, m_principal_s in DEBTS:
         balance, principal = Decimal(balance_s), _dec(principal_s)
         min_pay, installment, m_principal = _dec(min_pay_s), _dec(installment_s), _dec(m_principal_s)
@@ -285,7 +283,7 @@ def seed(db: Session) -> None:
             interest_rate_apr=Decimal(apr_s) if apr_s is not None else None,
             promo_apr=CARD_PROMO_APR if rtype is DebtRepaymentType.REVOLVING else None,
             promo_ends_on=(
-                _add_months(month_start, CARD_PROMO_MONTHS_AHEAD) - timedelta(days=1)
+                add_months(month_start, CARD_PROMO_MONTHS_AHEAD) - timedelta(days=1)
                 if rtype is DebtRepaymentType.REVOLVING
                 else None
             ),
@@ -294,7 +292,7 @@ def seed(db: Session) -> None:
             currency=ccy,
             installment_amount=installment,
             due_day_of_month=due,
-            ends_on=_add_months(month_start, ends_in) if ends_in is not None else None,
+            ends_on=add_months(month_start, ends_in) if ends_in is not None else None,
         ))
 
         # Budget lines are display-denominated by convention — the CLP loan's
@@ -303,7 +301,9 @@ def seed(db: Session) -> None:
         cat = Category(user_id=user.id, name=dname, kind=CategoryKind.DEBT_PAYMENT)
         db.add(cat)
         db.flush()
-        budget_lines.append((cat, _display_commitment(rtype, ccy, min_pay, installment)))
+        commitment = _display_commitment(rtype, ccy, min_pay, installment)
+        budget_lines.append((cat, commitment))
+        total_commit += commitment
 
         if acct is not None:
             payment_plan.append((dname, acct, cat, min_pay if min_pay is not None else installment, due, m_principal))
@@ -366,9 +366,6 @@ def seed(db: Session) -> None:
 
     db.commit()
 
-    total_commit = sum(
-        (_display_commitment(row[1], row[3], _dec(row[7]), _dec(row[8])) for row in DEBTS), start=Decimal("0"),
-    )
     print(f"Seeded demo user: {DEMO_EMAIL} / {DEMO_PASSWORD}")
     print(f"Monthly income:      ${MONTHLY_INCOME}")
     print(f"Debt commitments:    ${total_commit}  ({total_commit / MONTHLY_INCOME:.0%} of income; CLP at {CLP_TO_GBP})")

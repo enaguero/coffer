@@ -166,8 +166,9 @@ def test_networth_register_debts_carry_minimums_payoff_dates(auth_client) -> Non
 
 def test_networth_survives_fx_feed_failure(auth_client, monkeypatch) -> None:
     """The opportunistic FX refresh on the net-worth load must never fail the
-    endpoint — neither a provider error nor an unexpected exception."""
-    import app.api.v1.insights as insights_module
+    endpoint — neither a provider error nor an unexpected exception. "Reads
+    never raise" is refresh_user_rates' own contract, so the endpoint calls
+    it bare."""
     from app.services import fx_feed
 
     client, headers, _ = auth_client
@@ -190,11 +191,13 @@ def test_networth_survives_fx_feed_failure(auth_client, monkeypatch) -> None:
     assert r.status_code == 200, r.text
     assert r.json()["excluded_currencies"] == ["CLP"]  # no rate landed — honest exclusion
 
-    # Even an unexpected exception from the refresh itself can't 500 the load.
+    # Even an unexpected exception inside the refresh can't 500 the load.
+    fx_feed.reset_failure_cooldowns()  # the failed fetch above started one
+
     def _refresh_boom(*args, **kwargs):
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr(insights_module, "refresh_user_rates", _refresh_boom)
+    monkeypatch.setattr(fx_feed, "fetch_rates", _refresh_boom)
     assert client.get("/api/v1/insights/networth", headers=headers).status_code == 200
 
 

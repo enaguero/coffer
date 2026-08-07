@@ -246,7 +246,7 @@ def _mixed_portfolio() -> list[DebtInput]:
 
 def test_simulate_fixed_installment_pays_installment_not_fallback() -> None:
     debt = _typed("amortized", "10000", apr="12", installment="470.73", ends=add_months(START, 24), id=1)
-    result = simulate_payoff([debt], "avalanche", Decimal("0"), start=START)
+    result = simulate_payoff([debt], "avalanche", Decimal("0"), start=START, record_schedule=True)
     # The contractual installment, not the 2%/£25 fallback (which would be 200).
     assert result.monthly_budget == Decimal("470.73")
     assert result.schedule[0].payments[1] == Decimal("470.73")
@@ -270,7 +270,7 @@ def test_simulate_extra_cascade_skips_flat_and_reports_uncommitted() -> None:
             "flat", "6000", apr="10", installment="150", original="6000", ends=add_months(START, 40), id=2, name="Flat"
         ),
     ]
-    result = simulate_payoff(debts, "avalanche", Decimal("100"), start=START)
+    result = simulate_payoff(debts, "avalanche", Decimal("100"), start=START, record_schedule=True)
     assert not result.unpayable
     assert result.monthly_budget == Decimal("300.00")  # 50 + 150 + 100
     # The flat loan only ever receives its installment — never cascade extras.

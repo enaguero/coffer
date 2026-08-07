@@ -9,7 +9,7 @@ import {
   TrendingDown,
   X,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import {
   Area,
   AreaChart,
@@ -34,39 +34,73 @@ import {
   Select,
   WarningBanner,
 } from "../components/ui";
+import { apiErrorDetail } from "../lib/apiError";
 import { fmtMoney, toNum } from "../lib/format";
 import { useAccountCurrencyMap, useUserCurrency } from "../lib/useCurrency";
 
-const TYPE_LABELS: Record<DebtRepaymentType, string> = {
-  revolving: "Revolving",
-  amortized: "Amortized",
-  flat: "Flat interest",
-  statement_only: "Statement-only",
-};
-
-// One-line behavior summary per type, mirroring the backend's mechanics matrix.
-const TYPE_HELP: Record<DebtRepaymentType, string> = {
-  revolving: "Interest accrues on the current balance; you pay the minimum plus any extra.",
-  amortized: "Fixed installment until the end date; interest accrues on the current balance.",
-  flat: "Interest is fixed on the original principal — installments never shrink, so prepaying saves no interest.",
-  statement_only:
-    "Only the installment, balance, and end date are known — the rate is inferred and every figure is estimated.",
+// Everything the UI knows per repayment type, in one place — labels, the
+// one-line behavior summary, and the per-type form/card switches. Mirrors the
+// backend's mechanics matrix.
+const TYPE_CONFIG: Record<
+  DebtRepaymentType,
+  {
+    label: string;
+    help: string;
+    fixedInstallment: boolean; // installment (not minimum payment) is the contractual payment
+    showsApr: boolean;
+    showsPromo: boolean;
+    requiresPrincipal: boolean;
+    requiresBalance: boolean;
+    estimated: boolean; // the rate is inferred — figures carry an "estimated" badge
+  }
+> = {
+  revolving: {
+    label: "Revolving",
+    help: "Interest accrues on the current balance; you pay the minimum plus any extra.",
+    fixedInstallment: false,
+    showsApr: true,
+    showsPromo: true,
+    requiresPrincipal: false,
+    requiresBalance: false,
+    estimated: false,
+  },
+  amortized: {
+    label: "Amortized",
+    help: "Fixed installment until the end date; interest accrues on the current balance.",
+    fixedInstallment: true,
+    showsApr: true,
+    showsPromo: false,
+    requiresPrincipal: false,
+    requiresBalance: false,
+    estimated: false,
+  },
+  flat: {
+    label: "Flat interest",
+    help: "Interest is fixed on the original principal — installments never shrink, so prepaying saves no interest.",
+    fixedInstallment: true,
+    showsApr: true,
+    showsPromo: false,
+    requiresPrincipal: true,
+    requiresBalance: false,
+    estimated: false,
+  },
+  statement_only: {
+    label: "Statement-only",
+    help: "Only the installment, balance, and end date are known — the rate is inferred and every figure is estimated.",
+    fixedInstallment: true,
+    showsApr: false, // statement-only infers its rate
+    showsPromo: false,
+    requiresPrincipal: false,
+    requiresBalance: true,
+    estimated: true,
+  },
 };
 
 const COMMON_CURRENCIES = ["AUD", "CAD", "CHF", "CLP", "EUR", "GBP", "JPY", "USD"];
 
 type DebtPayload = Partial<Omit<Debt, "id">>;
 
-function apiError(err: unknown): string {
-  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  if (typeof detail === "string") return detail;
-  // Pydantic validation errors arrive as a list of {msg, ...} objects.
-  if (Array.isArray(detail) && detail.length > 0) {
-    const msg = (detail[0] as { msg?: unknown })?.msg;
-    if (typeof msg === "string") return msg.replace(/^Value error, /, "");
-  }
-  return "That change couldn't be saved — check the values.";
-}
+const SAVE_FALLBACK = "That change couldn't be saved — check the values.";
 
 type Strategy = "optimal" | "avalanche" | "snowball";
 
@@ -96,6 +130,29 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
       ).data,
   });
 
+  const chosen: DebtPlan | undefined = plan.data?.[strategy];
+  const compareKey: Strategy = strategy === "avalanche" ? "snowball" : "avalanche";
+  const other: DebtPlan | undefined = plan.data?.[compareKey];
+  const baseline = plan.data?.minimum;
+
+  // Derived render data can be 600 rows deep — rebuild it only when the
+  // chosen plan changes (plan response + strategy), not on every keystroke in
+  // the extras form.
+  const { chartData, schedule, hasUncommitted, paymentsByMonth } = useMemo(() => {
+    const schedule = chosen?.schedule ?? [];
+    return {
+      chartData:
+        chosen?.balance_series.map((p) => ({ on: p.on.slice(0, 7), balance: toNum(p.balance) })) ?? [],
+      schedule,
+      hasUncommitted: schedule.some((m) => toNum(m.uncommitted) > 0),
+      // month → (debt_id → amount) for the schedule table.
+      paymentsByMonth: new Map(
+        schedule.map((m) => [m.month, new Map(m.payments.map((p) => [p.debt_id, p.amount]))]),
+      ),
+    };
+  }, [chosen]);
+  const visibleSchedule = showFullSchedule ? schedule : schedule.slice(0, 24);
+
   if (!hasDebts) return null;
 
   function addSnowflake() {
@@ -111,18 +168,6 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
     setSfMonth("");
     setSfAmount("");
   }
-
-  const chosen: DebtPlan | undefined = plan.data?.[strategy];
-  const compareKey: Strategy = strategy === "avalanche" ? "snowball" : "avalanche";
-  const other: DebtPlan | undefined = plan.data?.[compareKey];
-  const baseline = plan.data?.minimum;
-
-  const chartData =
-    chosen?.balance_series.map((p) => ({ on: p.on.slice(0, 7), balance: toNum(p.balance) })) ?? [];
-
-  const schedule = chosen?.schedule ?? [];
-  const visibleSchedule = showFullSchedule ? schedule : schedule.slice(0, 24);
-  const hasUncommitted = schedule.some((m) => toNum(m.uncommitted) > 0);
 
   return (
     <Card className="mt-6 p-6">
@@ -372,13 +417,13 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
                   </thead>
                   <tbody>
                     {visibleSchedule.map((m) => {
-                      const byDebt = new Map(m.payments.map((p) => [p.debt_id, p.amount]));
+                      const byDebt = paymentsByMonth.get(m.month);
                       return (
                         <tr key={m.month} className="border-t border-slate-100">
                           <td className="py-1.5 nums">{m.month.slice(0, 7)}</td>
                           {chosen.debts.map((d) => (
                             <td key={d.id} className="py-1.5 text-right nums">
-                              {byDebt.has(d.id) ? fmtMoney(byDebt.get(d.id), currency) : "—"}
+                              {byDebt?.has(d.id) ? fmtMoney(byDebt.get(d.id), currency) : "—"}
                             </td>
                           ))}
                           {hasUncommitted && (
@@ -432,7 +477,7 @@ export default function Debts() {
       setError(null);
       invalidate();
     },
-    onError: (err) => setError(apiError(err)),
+    onError: (err) => setError(apiErrorDetail(err, SAVE_FALLBACK)),
   });
   const update = useMutation({
     mutationFn: async ({ id, ...body }: { id: number } & DebtPayload) =>
@@ -441,7 +486,7 @@ export default function Debts() {
       setError(null);
       invalidate();
     },
-    onError: (err) => setError(apiError(err)),
+    onError: (err) => setError(apiErrorDetail(err, SAVE_FALLBACK)),
   });
   const remove = useMutation({
     mutationFn: async (id: number) => api.delete(`/api/v1/debts/${id}`),
@@ -464,9 +509,10 @@ export default function Debts() {
   const [dueDay, setDueDay] = useState("");
 
   // Installment supersedes the minimum payment for the fixed-installment types.
-  const isFixed = repaymentType !== "revolving";
-  const showApr = repaymentType !== "statement_only"; // statement-only infers its rate
-  const showPromo = repaymentType === "revolving";
+  const typeCfg = TYPE_CONFIG[repaymentType];
+  const isFixed = typeCfg.fixedInstallment;
+  const showApr = typeCfg.showsApr;
+  const showPromo = typeCfg.showsPromo;
 
   const currencyOptions = Array.from(
     new Set([
@@ -557,13 +603,8 @@ export default function Debts() {
         right={
           <Button
             onClick={() => {
-              if (showForm) {
-                setShowForm(false);
-                resetForm();
-              } else {
-                resetForm();
-                setShowForm(true);
-              }
+              resetForm();
+              setShowForm((s) => !s);
             }}
           >
             <Plus className="h-4 w-4" />
@@ -626,20 +667,20 @@ export default function Debts() {
                 value={repaymentType}
                 onChange={(e) => setRepaymentType(e.target.value as DebtRepaymentType)}
               >
-                {(Object.keys(TYPE_LABELS) as DebtRepaymentType[]).map((t) => (
+                {(Object.keys(TYPE_CONFIG) as DebtRepaymentType[]).map((t) => (
                   <option key={t} value={t}>
-                    {TYPE_LABELS[t]}
+                    {TYPE_CONFIG[t].label}
                   </option>
                 ))}
               </Select>
-              <span className="mt-1 block text-xs text-slate-400">{TYPE_HELP[repaymentType]}</span>
+              <span className="mt-1 block text-xs text-slate-400">{typeCfg.help}</span>
             </label>
             <label>
-              <Label>Original principal{repaymentType === "flat" ? " (required)" : ""}</Label>
-              <Input required={repaymentType === "flat"} value={original} onChange={(e) => setOriginal(e.target.value)} />
+              <Label>Original principal{typeCfg.requiresPrincipal ? " (required)" : ""}</Label>
+              <Input required={typeCfg.requiresPrincipal} value={original} onChange={(e) => setOriginal(e.target.value)} />
             </label>
             <label>
-              <Label>Current balance{repaymentType === "statement_only" ? " (required)" : ""}</Label>
+              <Label>Current balance{typeCfg.requiresBalance ? " (required)" : ""}</Label>
               <Input value={current} onChange={(e) => setCurrent(e.target.value)} />
             </label>
             <label>
@@ -713,6 +754,8 @@ export default function Debts() {
           </div>
         )}
         {items.map((d) => {
+          const cfg = TYPE_CONFIG[d.repayment_type];
+          const pay = cfg.fixedInstallment ? d.installment_amount : d.minimum_payment;
           const dCcy = d.currency ?? currency;
           const originalAmt = toNum(d.original_principal);
           const cur = toNum(d.current_balance);
@@ -726,8 +769,8 @@ export default function Debts() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="truncate font-semibold text-slate-900">{d.name}</h3>
-                    <Badge tone="slate">{TYPE_LABELS[d.repayment_type]}</Badge>
-                    {d.repayment_type === "statement_only" && <Badge tone="amber">estimated</Badge>}
+                    <Badge tone="slate">{cfg.label}</Badge>
+                    {cfg.estimated && <Badge tone="amber">estimated</Badge>}
                     {promoActive ? (
                       <Badge tone="amber">
                         <TrendingDown className="h-3 w-3" />
@@ -773,18 +816,8 @@ export default function Debts() {
 
               <div className="mt-4 grid grid-cols-3 gap-3 border-t border-slate-100 pt-3 text-xs">
                 <div>
-                  <div className="text-slate-500">
-                    {d.repayment_type === "revolving" ? "Min pay" : "Installment"}
-                  </div>
-                  <div className="mt-0.5 font-medium nums">
-                    {d.repayment_type === "revolving"
-                      ? d.minimum_payment
-                        ? fmtMoney(d.minimum_payment, dCcy)
-                        : "—"
-                      : d.installment_amount
-                        ? fmtMoney(d.installment_amount, dCcy)
-                        : "—"}
-                  </div>
+                  <div className="text-slate-500">{cfg.fixedInstallment ? "Installment" : "Min pay"}</div>
+                  <div className="mt-0.5 font-medium nums">{pay ? fmtMoney(pay, dCcy) : "—"}</div>
                 </div>
                 <div>
                   <div className="text-slate-500">Due</div>

@@ -24,7 +24,7 @@ from app.models.account import Account
 from app.models.debt import Debt
 from app.models.fx_rate import RATE_MAX, RATE_QUANTUM, FxRate
 from app.models.user import User
-from app.services.account_loader import resolve_display_currency
+from app.services.account_loader import load_display_and_rates
 from app.services.fx_feed import refresh_user_rates
 
 router = APIRouter(prefix="/fx", tags=["fx"])
@@ -70,21 +70,22 @@ def _list_rates(db, user_id: int) -> list[FxRate]:
 def _refresh_inputs(db, current: User) -> tuple[set[str], str | None]:
     """The currencies the user actually holds (accounts + debts) and the
     display currency to quote them against — what the feed refresh needs."""
-    account_rows = db.execute(select(Account.type, Account.currency).where(Account.user_id == current.id)).all()
+    display, _rates = load_display_and_rates(db, current)
+    account_currencies = set(db.scalars(select(Account.currency).where(Account.user_id == current.id).distinct()))
     debt_currencies = set(
         db.scalars(select(Debt.currency).where(Debt.user_id == current.id, Debt.currency.is_not(None)).distinct())
     )
-    # Row objects expose .type/.currency — all resolve_display_currency reads.
-    display = resolve_display_currency(current, account_rows)
-    return {row.currency for row in account_rows} | debt_currencies, display
+    return account_currencies | debt_currencies, display
 
 
 @router.get("", response_model=list[FxRateOut])
 def list_rates(current: CurrentUser, db: DbSession) -> list[FxRate]:
-    # Opportunistic refresh — a no-op unless the user opted in AND auto rates
-    # are stale AND no failure cooldown is running (see services/fx_feed.py).
-    currencies_in_use, display = _refresh_inputs(db, current)
-    refresh_user_rates(db, current, currencies_in_use, display)
+    # Opportunistic refresh, gated here so the common opted-out path pays for
+    # zero extra queries — then a no-op unless auto rates are stale AND no
+    # failure cooldown is running (see services/fx_feed.py).
+    if current.fx_auto_refresh:
+        currencies_in_use, display = _refresh_inputs(db, current)
+        refresh_user_rates(db, current, currencies_in_use, display)
     return _list_rates(db, current.id)
 
 

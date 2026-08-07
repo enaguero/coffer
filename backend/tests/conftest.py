@@ -42,6 +42,16 @@ from app.core.config import settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
+from app.services.fx_feed import reset_failure_cooldowns  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_fx_cooldowns() -> Generator[None, None, None]:
+    """The FX feed's failure cooldown is module-level in-process state — never
+    let one test's outage leak into the next."""
+    reset_failure_cooldowns()
+    yield
+    reset_failure_cooldowns()
 
 
 @pytest.fixture(autouse=True)

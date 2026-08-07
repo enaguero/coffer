@@ -26,12 +26,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.debt import Debt
-from app.models.fx_rate import FxRate
 from app.models.user import User
-from app.services.account_loader import load_forecast_scope, load_txn_lites
+from app.services.account_loader import load_forecast_scope, load_fx_rates, load_txn_lites
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
-from app.services.analytics.fx import convert
+from app.services.analytics.fx import convert_optional
 from app.services.analytics.net_worth import current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
 from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
@@ -66,7 +65,7 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     included_ids = {a.id for a in in_display}
     # Foreign-currency debt amounts convert at the user's saved rates before
     # they enter display-currency text (exclude-and-flag when no rate exists).
-    fx_rates = {r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user.id))}
+    fx_rates = load_fx_rates(db, user.id)
 
     # --- Data freshness -------------------------------------------------------
     # Fresh = a recent transaction OR a recent balance snapshot: valuation-only
@@ -213,11 +212,11 @@ def _owed_text(d: Debt, display: str | None, rates: dict[str, Decimal]) -> str:
     """The 'X owed' fragment for a debt line, converting foreign-currency
     balances to the display currency — a missing rate excludes the figure and
     flags why, never mixing a native magnitude into display-currency text."""
-    if d.currency is None or display is None or d.currency == display:
-        return f"with {_fmt(d.current_balance)} owed"
-    converted = convert(d.current_balance, d.currency, display, rates)
+    converted = convert_optional(d.current_balance, d.currency, display, rates)
     if converted is None:
         return f"— balance held in {d.currency} (no FX rate saved)"
+    if converted is d.current_balance:  # passthrough — already display-denominated
+        return f"with {_fmt(converted)} owed"
     return f"with {_fmt(converted)} owed (converted from {d.currency})"
 
 

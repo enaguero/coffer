@@ -39,6 +39,14 @@ export const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December",
 ];
 
+// "2027-03-15" → "Mar 2027" by string split, without a Date round-trip (UTC
+// parsing could shift a first-of-month date into the previous month in
+// western timezones).
+export function fmtMonthYear(iso: string): string {
+  const [y, m] = iso.split("-");
+  return `${MONTH_NAMES[Number(m) - 1]?.slice(0, 3) ?? "?"} ${y}`;
+}
+
 // Curated palette for categorical charts — colorblind-considerate, decent contrast on white.
 export const CHART_COLORS = [
   "#4f46e5", // indigo-600

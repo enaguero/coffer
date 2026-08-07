@@ -6,9 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.account import Account
 from app.models.debt import Debt
-from app.models.fx_rate import FxRate
 from app.schemas.debt import (
     DebtCreate,
     DebtOut,
@@ -21,10 +19,10 @@ from app.schemas.debt import (
     SchedulePaymentOut,
     repayment_type_violation,
 )
-from app.services.account_loader import resolve_display_currency
+from app.services.account_loader import load_display_and_rates
 from app.services.analytics.debt_optimizer import optimize
 from app.services.analytics.debt_plan import DebtInput, PlanResult, convert_debt_inputs
-from app.services.analytics.fx import convert
+from app.services.analytics.fx import convert_optional
 
 router = APIRouter(prefix="/debts", tags=["debts"])
 
@@ -43,15 +41,6 @@ class DebtSummary(BaseModel):
     excluded_currencies: list[str] = Field(default_factory=list)
 
 
-def _display_and_rates(db, current) -> tuple[str | None, dict[str, Decimal]]:
-    """The display currency + saved FX rates, resolved the way insights does
-    (rows expose .type/.currency — all resolve_display_currency reads)."""
-    account_rows = db.execute(select(Account.type, Account.currency).where(Account.user_id == current.id)).all()
-    display = resolve_display_currency(current, account_rows)
-    rates = {r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == current.id))}
-    return display, rates
-
-
 @router.get("", response_model=list[DebtOut])
 def list_debts(current: CurrentUser, db: DbSession) -> list[Debt]:
     return list(db.scalars(select(Debt).where(Debt.user_id == current.id).order_by(Debt.name)))
@@ -60,21 +49,18 @@ def list_debts(current: CurrentUser, db: DbSession) -> list[Debt]:
 @router.get("/summary", response_model=DebtSummary)
 def debt_summary(current: CurrentUser, db: DbSession) -> DebtSummary:
     debts = list(db.scalars(select(Debt).where(Debt.user_id == current.id).order_by(Debt.name)))
-    display, rates = _display_and_rates(db, current)
+    display, rates = load_display_and_rates(db, current)
     total = Decimal("0")
     excluded: set[str] = set()
     items: list[DebtSummaryItemOut] = []
     for d in debts:
         item = DebtSummaryItemOut.model_validate(d)
-        if d.currency is None or display is None or d.currency == display:
-            total += d.current_balance
+        value = convert_optional(d.current_balance, d.currency, display, rates)
+        if value is None:
+            item.converted = False
+            excluded.add(d.currency)
         else:
-            value = convert(d.current_balance, d.currency, display, rates)
-            if value is None:
-                item.converted = False
-                excluded.add(d.currency)
-            else:
-                total += value
+            total += value
         items.append(item)
     return DebtSummary(total_owed=total, by_debt=items, excluded_currencies=sorted(excluded))
 
@@ -145,7 +131,7 @@ def plan_payoff(payload: PlanRequest, current: CurrentUser, db: DbSession) -> Pl
     currency: foreign-currency debts convert once at plan start (saved rates),
     and debts with no rate are excluded from the pool and flagged."""
     debts = list(db.scalars(select(Debt).where(Debt.user_id == current.id)))
-    display, rates = _display_and_rates(db, current)
+    display, rates = load_display_and_rates(db, current)
     pool, excluded, fx_notes = convert_debt_inputs([DebtInput.from_model(d) for d in debts], display, rates)
     snowflakes = {s.month: s.amount for s in payload.snowflakes}
     optimal, results = optimize(pool, payload.extra_monthly, snowflakes)

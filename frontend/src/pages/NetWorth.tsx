@@ -26,7 +26,7 @@ import {
   WarningBanner,
 } from "../components/ui";
 import { useAuth } from "../contexts/useAuth";
-import { fmtMoney, toNum } from "../lib/format";
+import { fmtMoney, fmtMonthYear, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
 
 const WRAPPER_LABEL: Record<string, string> = {
@@ -46,15 +46,6 @@ const SOURCE_TONE: Record<string, "emerald" | "sky" | "slate"> = {
 // would silently truncate inputs like "1,000" to 1.
 const RATE_RE = /^(\d+\.?\d*|\.\d+)$/;
 
-const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-// "2027-03-15" → "Mar 2027" without a Date round-trip (UTC parsing could
-// shift a first-of-month date into the previous month in western timezones).
-function fmtMonthYear(iso: string): string {
-  const [y, m] = iso.split("-");
-  return `${MONTH_ABBR[Number(m) - 1] ?? "?"} ${y}`;
-}
-
 export default function NetWorth() {
   const qc = useQueryClient();
   const currency = useUserCurrency();
@@ -72,18 +63,10 @@ export default function NetWorth() {
   const invalidateFx = (keys: string[]) => {
     for (const key of keys) qc.invalidateQueries({ queryKey: [key] });
   };
-  const saveRate = useMutation({
-    mutationFn: async (vars: { currency: string; rate: string }) =>
-      api.put("/api/v1/fx", [{ currency: vars.currency, rate: vars.rate }]),
-    onSuccess: () => {
-      setNewFxCurrency("");
-      setNewFxRate("");
-      invalidateFx(["fx", "networth"]);
-    },
-  });
-  // Separate from saveRate so committing a row edit can't wipe a half-typed
-  // new-rate form.
-  const updateRate = useMutation({
+  // One PUT for both the add-rate form and per-row edits; the form clears its
+  // own fields via a per-call onSuccess so a row commit can't wipe a
+  // half-typed new rate.
+  const putRate = useMutation({
     mutationFn: async (vars: { currency: string; rate: string }) =>
       api.put("/api/v1/fx", [{ currency: vars.currency, rate: vars.rate }]),
     onSuccess: () => invalidateFx(["fx", "networth"]),
@@ -162,7 +145,7 @@ export default function NetWorth() {
       return next;
     });
     if (draft === r.rate || !RATE_RE.test(draft) || !(Number(draft) > 0)) return;
-    updateRate.mutate({ currency: r.currency, rate: draft });
+    putRate.mutate({ currency: r.currency, rate: draft });
   }
 
   // Staleness anchor for the refresh-failure message: the newest saved as_of.
@@ -471,8 +454,18 @@ export default function NetWorth() {
                 />
                 <Button
                   className="!py-1.5"
-                  disabled={!/^[A-Z]{3}$/.test(newFxCurrency) || !rateValid || saveRate.isPending}
-                  onClick={() => saveRate.mutate({ currency: newFxCurrency, rate: newFxRate })}
+                  disabled={!/^[A-Z]{3}$/.test(newFxCurrency) || !rateValid || putRate.isPending}
+                  onClick={() =>
+                    putRate.mutate(
+                      { currency: newFxCurrency, rate: newFxRate },
+                      {
+                        onSuccess: () => {
+                          setNewFxCurrency("");
+                          setNewFxRate("");
+                        },
+                      },
+                    )
+                  }
                 >
                   Save rate
                 </Button>

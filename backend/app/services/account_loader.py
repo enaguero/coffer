@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.models.account import LIQUID_ACCOUNT_TYPES, Account
 from app.models.balance_snapshot import BalanceSnapshot
+from app.models.fx_rate import FxRate
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.services.analytics.fx import most_common_currency
@@ -58,9 +59,20 @@ def resolve_display_currency(user: User, accounts: list[AccountData]) -> str | N
     return most_common_currency(liquid) or most_common_currency([a.currency for a in accounts])
 
 
-def load_forecast_scope(
-    db: Session, user: User
-) -> tuple[list[AccountData], str | None, list[AccountData], list[str]]:
+def load_fx_rates(db: Session, user_id: int) -> dict[str, Decimal]:
+    """The user's saved FX rates as {currency: rate} — the shape convert wants."""
+    return {r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))}
+
+
+def load_display_and_rates(db: Session, user: User) -> tuple[str | None, dict[str, Decimal]]:
+    """Display currency + saved FX rates without loading full AccountData.
+    The lightweight (type, currency) rows duck-type as accounts — .type and
+    .currency are all resolve_display_currency reads."""
+    account_rows = db.execute(select(Account.type, Account.currency).where(Account.user_id == user.id)).all()
+    return resolve_display_currency(user, account_rows), load_fx_rates(db, user.id)
+
+
+def load_forecast_scope(db: Session, user: User) -> tuple[list[AccountData], str | None, list[AccountData], list[str]]:
     """The single-currency forecast's inputs, shared by /insights/forecast and
     the weekly digest so the two projections can never disagree: (all accounts,
     display currency, the liquid display-currency accounts that feed the

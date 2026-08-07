@@ -46,6 +46,12 @@ AUTO_MAX_AGE = timedelta(days=1)
 _failure_cooldowns: dict[int, float] = {}
 
 
+def reset_failure_cooldowns() -> None:
+    """Clear every per-user failure cooldown — the test-isolation seam for the
+    module-level state above."""
+    _failure_cooldowns.clear()
+
+
 class FxFeedError(Exception):
     """Any fetch/network/shape failure — callers degrade to last-known rates."""
 
@@ -123,9 +129,27 @@ def refresh_user_rates(
     Returns the number of rows written. No-ops (returning 0) unless the user
     opted in; also when there is no display currency to quote against, every
     needed currency is manual, auto rates are fresh (unless `force`), or the
-    failure cooldown is active (`force` does NOT bypass the cooldown). A fetch
-    failure leaves existing rows untouched and starts the cooldown.
+    failure cooldown is active (`force` does NOT bypass the cooldown).
+
+    Never raises: read endpoints call this bare, so ANY failure — fetch,
+    payload shape, even an unexpected bug — leaves existing rows untouched,
+    starts the cooldown, and returns 0 instead of failing the request.
     """
+    try:
+        return _refresh_user_rates(db, user, currencies_in_use, display_currency, force=force)
+    except Exception:
+        _failure_cooldowns[user.id] = time.monotonic()
+        return 0
+
+
+def _refresh_user_rates(
+    db: Session,
+    user: User,
+    currencies_in_use: set[str],
+    display_currency: str | None,
+    *,
+    force: bool,
+) -> int:
     if not user.fx_auto_refresh or not display_currency:
         return 0
     needed = {c for c in currencies_in_use if c != display_currency}
@@ -141,11 +165,9 @@ def refresh_user_rates(
     last_failure = _failure_cooldowns.get(user.id)
     if last_failure is not None and time.monotonic() - last_failure < FAILURE_COOLDOWN_SECONDS:
         return 0
-    try:
-        fetched = fetch_rates(display_currency, needed)
-    except FxFeedError:
-        _failure_cooldowns[user.id] = time.monotonic()
-        return 0
+    # A FxFeedError here propagates to the wrapper above, which records the
+    # failure cooldown.
+    fetched = fetch_rates(display_currency, needed)
     _failure_cooldowns.pop(user.id, None)
     if not fetched:
         return 0

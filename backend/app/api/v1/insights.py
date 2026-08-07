@@ -15,7 +15,6 @@ from app.core.deps import CurrentUser, DbSession
 from app.core.rate_limit import limiter
 from app.models.account import Account, UkWrapper
 from app.models.debt import Debt
-from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.insights import (
@@ -32,6 +31,7 @@ from app.schemas.insights import (
 from app.services.account_loader import (
     load_account_data,
     load_forecast_scope,
+    load_fx_rates,
     load_txn_lites,
     resolve_display_currency,
     sum_positive_inflows,
@@ -46,10 +46,6 @@ from app.services.digest import compose_digest, send_email
 from app.services.fx_feed import refresh_user_rates
 
 router = APIRouter(prefix="/insights", tags=["insights"])
-
-
-def _fx_rates(db, user_id: int) -> dict:
-    return {r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))}
 
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
@@ -134,13 +130,11 @@ def networth(
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
     display = resolve_display_currency(current, account_data)
     # Opportunistic FX refresh, mirroring GET /fx: a no-op unless the user
-    # opted in, and any failure serves last-known rates — never a 500.
-    try:
-        in_use = {a.currency for a in account_data} | {d.currency for d in debts if d.currency is not None}
-        refresh_user_rates(db, current, in_use, display)
-    except Exception:
-        pass
-    rates = _fx_rates(db, current.id)
+    # opted in, and refresh_user_rates never raises — any failure serves
+    # last-known rates instead of a 500.
+    in_use = {a.currency for a in account_data} | {d.currency for d in debts if d.currency is not None}
+    refresh_user_rates(db, current, in_use, display)
+    rates = load_fx_rates(db, current.id)
     payoff_by_id = _minimums_payoff_dates([DebtInput.from_model(d) for d in debts], display, rates)
     report = compute_net_worth(
         account_data,
@@ -307,7 +301,7 @@ def surplus(
             goal_tuples,
             floor,
             display_currency=display,
-            rates=_fx_rates(db, current.id),
+            rates=load_fx_rates(db, current.id),
         )
         if considered > 0
         else []

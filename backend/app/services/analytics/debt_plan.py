@@ -29,10 +29,14 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.services.analytics.fx import convert
+from app.services.analytics.fx import convert, convert_optional
 
 TWO_DP = Decimal("0.01")
 MAX_MONTHS = 600
+# Hoisted APR-divisor constants — monthly_interest runs inside the simulator's
+# month loop, so it shouldn't re-parse Decimal strings every call.
+PCT = Decimal("100")
+MONTHS_PER_YEAR = Decimal("12")
 # Fallback when a debt has no stored minimum payment: the greater of 2% of the
 # balance at plan start or £25 — the standard UK credit-card floor.
 DEFAULT_MIN_PCT = Decimal("0.02")
@@ -43,6 +47,14 @@ FIXED_INSTALLMENT_TYPES = frozenset({"amortized", "flat", "statement_only"})
 # Bracket ceiling for statement-only rate inference, % APR. An implied rate
 # above this is treated as degenerate input, not a plausible loan.
 STATEMENT_APR_CEILING = Decimal("200")
+
+
+def prepayable(debt: DebtInput) -> bool:
+    """Whether a prepaid pound saves interest — the one place "flat loans are
+    never targeted" lives. Flat interest is fixed on the original principal,
+    so extra payments skip flat loans (cascade, optimizer, allocation ranking)
+    and surface as uncommitted surplus when nothing else is open."""
+    return debt.repayment_type != "flat"
 
 
 @dataclass
@@ -145,32 +157,29 @@ def convert_debt_inputs(
     pool: list[DebtInput] = []
     excluded: list[DebtInput] = []
     assumptions: list[str] = []
+
+    def conv(d: DebtInput, v: Decimal | None) -> Decimal | None:
+        """Convert one of the debt's optional amounts (None stays None)."""
+        return convert(v, d.currency, display_currency, rates) if v is not None else None
+
     for d in debts:
-        if d.currency is None or display_currency is None or d.currency == display_currency:
+        balance = convert_optional(d.balance, d.currency, display_currency, rates)
+        if balance is d.balance:
+            # Passthrough leg (see convert_optional): display-denominated by
+            # convention, or no display currency resolved.
             pool.append(d)
             continue
-        rate = rates.get(d.currency)
-        if rate is None or rate <= 0:
+        if balance is None:
             excluded.append(d)
             assumptions.append(f"{d.name}: unconverted ({d.currency}) — excluded from plan")
             continue
         pool.append(
             replace(
                 d,  # currency kept — per-debt outputs echo the debt's own currency
-                balance=convert(d.balance, d.currency, display_currency, rates),
-                minimum_payment=(
-                    convert(d.minimum_payment, d.currency, display_currency, rates)
-                    if d.minimum_payment is not None
-                    else None
-                ),
-                installment=(
-                    convert(d.installment, d.currency, display_currency, rates) if d.installment is not None else None
-                ),
-                original_principal=(
-                    convert(d.original_principal, d.currency, display_currency, rates)
-                    if d.original_principal is not None
-                    else None
-                ),
+                balance=balance,
+                minimum_payment=conv(d, d.minimum_payment),
+                installment=conv(d, d.installment),
+                original_principal=conv(d, d.original_principal),
             )
         )
         assumptions.append(f"{d.name}: amounts ≈ converted from {d.currency} to {display_currency} at today's rate")
@@ -295,11 +304,11 @@ def monthly_interest(
             return Decimal("0.00")
         principal = debt.original_principal if debt.original_principal is not None else Decimal("0")
         apr = debt.apr if debt.apr is not None else Decimal("0")
-        return (principal * apr / Decimal("100") / Decimal("12")).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+        return (principal * apr / PCT / MONTHS_PER_YEAR).quantize(TWO_DP, rounding=ROUND_HALF_UP)
     if debt.repayment_type == "statement_only":
         apr = statement_apr if statement_apr is not None else infer_statement_rate(debt, on)[0]
-        return (balance * apr / Decimal("100") / Decimal("12")).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-    rate = effective_apr(debt, on) / Decimal("100") / Decimal("12")
+        return (balance * apr / PCT / MONTHS_PER_YEAR).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+    rate = effective_apr(debt, on) / PCT / MONTHS_PER_YEAR
     return (balance * rate).quantize(TWO_DP, rounding=ROUND_HALF_UP)
 
 
@@ -333,24 +342,20 @@ def ends_on_overrun_assumption(debt: DebtInput, payoff_on: date | None) -> str |
     )
 
 
-def marginal_rate(debt: DebtInput, on: date) -> Decimal:
+def marginal_rate(debt: DebtInput, on: date, statement_rates: dict[int, Decimal] | None = None) -> Decimal:
     """What a prepaid pound earns, per the debt's mechanics — the
-    mechanics-aware replacement for effective_apr in allocation ranking.
-    Flat loans return zero: interest is fixed on the original principal, so
-    prepayment saves nothing (v1 — no early-settlement rebate modelling).
-    Statement-only debts return the inferred (estimated) rate."""
-    if debt.repayment_type == "flat":
+    mechanics-aware replacement for effective_apr in allocation ranking and
+    avalanche's cascade targeting. Flat loans return zero: interest is fixed
+    on the original principal, so prepayment saves nothing (v1 — no
+    early-settlement rebate modelling). Statement-only debts return the
+    inferred (estimated) rate — a `statement_rates` hit wins, so the simulator
+    can reuse the rates it inferred once at plan start."""
+    if not prepayable(debt):
         return Decimal("0")
     if debt.repayment_type == "statement_only":
+        if statement_rates is not None and debt.id in statement_rates:
+            return statement_rates[debt.id]
         return infer_statement_rate(debt, on)[0]
-    return effective_apr(debt, on)
-
-
-def _cascade_rate(debt: DebtInput, on: date, statement_rates: dict[int, Decimal]) -> Decimal:
-    """Avalanche's targeting rate: mechanics-aware, reusing the rates inferred
-    at plan start for statement-only debts (flat never reaches the cascade)."""
-    if debt.repayment_type == "statement_only":
-        return statement_rates.get(debt.id, Decimal("0"))
     return effective_apr(debt, on)
 
 
@@ -363,6 +368,8 @@ def simulate_payoff(
     *,
     priority: list[int] | None = None,  # strategy="fixed": debt ids, first attacked first
     interest_bound: Decimal | None = None,  # abort once running interest exceeds this (optimizer pruning)
+    statement_rates: dict[int, Decimal] | None = None,  # plan-start inferred rates (optimizer shares one inference)
+    record_schedule: bool = False,  # ScheduleMonth rows are built only on demand
 ) -> PlanResult:
     start = start or date.today()
     snowflakes = snowflakes or {}
@@ -377,17 +384,20 @@ def simulate_payoff(
             assumptions.append(note)
 
     # Statement-only rates are inferred once at plan start and reused every
-    # month — the entered terms don't change mid-plan.
-    statement_rates: dict[int, Decimal] = {}
-    for d in live:
-        if d.repayment_type == "statement_only":
-            rate, note = infer_statement_rate(d, start)
-            statement_rates[d.id] = rate
-            assumptions.append(note)
+    # month — the entered terms don't change mid-plan. A caller-supplied dict
+    # (the optimizer sharing one inference across candidate runs) skips both
+    # the bisection and its assumption notes.
+    if statement_rates is None:
+        statement_rates = {}
+        for d in live:
+            if d.repayment_type == "statement_only":
+                rate, note = infer_statement_rate(d, start)
+                statement_rates[d.id] = rate
+                assumptions.append(note)
 
     if strategy != "minimum":
         for d in live:
-            if d.repayment_type == "flat":
+            if not prepayable(d):
                 assumptions.append(
                     f"{d.name}: flat interest is charged on the original principal — prepaying saves no interest"
                 )
@@ -465,7 +475,7 @@ def simulate_payoff(
         # lands on the schedule row as uncommitted surplus.
         if strategy != "minimum":
             while pool > 0:
-                open_debts = [d for d in live if balances[d.id] > 0 and d.repayment_type != "flat"]
+                open_debts = [d for d in live if balances[d.id] > 0 and prepayable(d)]
                 if not open_debts:
                     break
                 if strategy == "snowball":
@@ -474,7 +484,7 @@ def simulate_payoff(
                     target = min(open_debts, key=lambda d: priority_rank.get(d.id, len(priority_rank)))
                 else:  # avalanche
                     target = max(
-                        open_debts, key=lambda d: (_cascade_rate(d, month_date, statement_rates), -balances[d.id])
+                        open_debts, key=lambda d: (marginal_rate(d, month_date, statement_rates), -balances[d.id])
                     )
                 pay = min(pool, balances[target.id])
                 balances[target.id] -= pay
@@ -484,13 +494,14 @@ def simulate_payoff(
                 if balances[target.id] <= 0:
                     payoff_month.setdefault(target.id, month)
 
-        schedule.append(
-            ScheduleMonth(
-                month=month_date,
-                payments={debt_id: amount.quantize(TWO_DP) for debt_id, amount in paid_this_month.items()},
-                uncommitted=pool.quantize(TWO_DP),
+        if record_schedule:
+            schedule.append(
+                ScheduleMonth(
+                    month=month_date,
+                    payments={debt_id: amount.quantize(TWO_DP) for debt_id, amount in paid_this_month.items()},
+                    uncommitted=pool.quantize(TWO_DP),
+                )
             )
-        )
         series.append((month_date, sum((b for b in balances.values() if b > 0), Decimal("0"))))
 
         # If nothing can ever be paid off (interest outruns budget), bail out.

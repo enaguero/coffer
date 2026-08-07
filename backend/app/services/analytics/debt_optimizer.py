@@ -33,7 +33,9 @@ from app.services.analytics.debt_plan import (
     _months_between,
     compare_strategies,
     expected_payment,
+    infer_statement_rate,
     marginal_rate,
+    prepayable,
     simulate_payoff,
 )
 
@@ -80,20 +82,29 @@ def optimize(
     """The winning run (strategy label "optimal") plus the standard
     minimum/snowball/avalanche comparison dict it was measured against."""
     start = start or date.today()
+    # The comparison runs stay self-contained (no shared statement rates):
+    # their inference assumption notes are API-visible per displayed strategy,
+    # and passing precomputed rates would strip them.
     comparison = compare_strategies(debts, extra_monthly, snowflakes, start)
 
     live = [d for d in debts if d.balance > 0]
-    optimizable = [d for d in live if d.repayment_type != "flat"]
+    optimizable = [d for d in live if prepayable(d)]
 
     if not optimizable:
         # Nothing prepayment can improve: the optimal plan is the minimums-only
-        # baseline, with the reason on record (unless there are no open debts
-        # at all — an empty pool has nothing to explain).
-        base = comparison["minimum"]
+        # baseline (re-run to materialize its schedule), with the reason on
+        # record (unless there are no open debts at all — an empty pool has
+        # nothing to explain).
+        base = simulate_payoff(debts, "minimum", start=start, record_schedule=True)
         extra = [ALL_FLAT_ASSUMPTION] if live else []
         return replace(base, strategy="optimal", assumptions=[*base.assumptions, *extra]), comparison
 
     best = min(comparison.values(), key=_key)
+    best_priority: list[int] | None = None
+
+    # Statement-only rates depend only on plan start — infer once here and
+    # share across every candidate run instead of re-bisecting per ordering.
+    statement_rates = {d.id: infer_statement_rate(d, start)[0] for d in live if d.repayment_type == "statement_only"}
 
     if comparison["avalanche"].unpayable:
         # The full budget can't outrun the arithmetic under the best dynamic
@@ -107,10 +118,28 @@ def optimize(
 
     for priority in candidates:
         bound = None if best.unpayable else best.total_interest
-        run = simulate_payoff(debts, "fixed", extra_monthly, snowflakes, start, priority=priority, interest_bound=bound)
+        run = simulate_payoff(
+            debts,
+            "fixed",
+            extra_monthly,
+            snowflakes,
+            start,
+            priority=priority,
+            interest_bound=bound,
+            statement_rates=statement_rates,
+        )
         if run.pruned:
             continue
         if _key(run) < _key(best):
             best = run
+            best_priority = priority
 
-    return replace(best, strategy="optimal"), comparison
+    # Candidate runs skip schedule recording and (via the shared rates) the
+    # inference notes; one full re-run of the winning configuration restores
+    # both. A comparison-strategy winner re-runs under its own strategy name —
+    # `priority` is ignored outside strategy="fixed", so the same call covers
+    # every case.
+    final = simulate_payoff(
+        debts, best.strategy, extra_monthly, snowflakes, start, priority=best_priority, record_schedule=True
+    )
+    return replace(final, strategy="optimal"), comparison

@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.services.analytics.debt_plan import DebtInput, marginal_rate
-from app.services.analytics.fx import convert
+from app.services.analytics.debt_plan import DebtInput, marginal_rate, prepayable
+from app.services.analytics.fx import convert_optional
 
 TWO_DP = Decimal("0.01")
 
@@ -111,30 +111,26 @@ def rank_allocations(
             continue
         # Foreign-currency balances convert at the saved rate; without one the
         # debt is excluded from the figures and flagged — never silently mixed.
-        balance = d.balance
-        converted_suffix = ""
-        if d.currency is not None and display_currency is not None and d.currency != display_currency:
-            converted = convert(d.balance, d.currency, display_currency, rates)
-            if converted is None:
-                unconverted.append(
-                    AllocationOption(
-                        kind="debt",
-                        target_id=d.id,
-                        name=d.name,
-                        apr=None,
-                        yearly_interest_saved=None,
-                        months_earlier=None,
-                        runway_months_gained=None,
-                        note=f"Balance held in {d.currency} with no saved FX rate — excluded from the figures",
-                    )
+        balance = convert_optional(d.balance, d.currency, display_currency, rates)
+        if balance is None:
+            unconverted.append(
+                AllocationOption(
+                    kind="debt",
+                    target_id=d.id,
+                    name=d.name,
+                    apr=None,
+                    yearly_interest_saved=None,
+                    months_earlier=None,
+                    runway_months_gained=None,
+                    note=f"Balance held in {d.currency} with no saved FX rate — excluded from the figures",
                 )
-                continue
-            balance = converted
-            converted_suffix = f" (balance converted from {d.currency})"
+            )
+            continue
+        converted_suffix = "" if balance is d.balance else f" (balance converted from {d.currency})"
         apr = rate_of[d.id]
         applied = min(amount, balance)
         saved = (applied * apr / Decimal("100")).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-        if d.repayment_type == "flat":
+        if not prepayable(d):
             note = "Flat-rate loan — interest is fixed on the original principal, so prepaying saves no interest"
         elif d.repayment_type == "statement_only":
             note = (

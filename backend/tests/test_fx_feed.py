@@ -6,7 +6,6 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
-import pytest
 from sqlalchemy import select
 
 from app.models.fx_rate import FxRate
@@ -14,14 +13,8 @@ from app.services import fx_feed
 
 TODAY = date.today()
 
-
-@pytest.fixture(autouse=True)
-def _reset_cooldowns():
-    """The failure cooldown is module-level in-process state — never let one
-    test's outage leak into the next."""
-    fx_feed._failure_cooldowns.clear()
-    yield
-    fx_feed._failure_cooldowns.clear()
+# The failure cooldown is module-level in-process state — conftest's autouse
+# _reset_fx_cooldowns fixture clears it around every test.
 
 
 class _FakeResponse:
