@@ -26,6 +26,13 @@ export interface FxRate {
   source: "manual" | "auto";
 }
 
+export interface FxRefreshOut {
+  // Rows actually written by this refresh; 0 with rates present means the
+  // feed skipped (failure cooldown) or failed — last-known rates still serve.
+  refreshed_count: number;
+  rates: FxRate[];
+}
+
 export type UkWrapper = "isa" | "lisa" | "pension";
 
 export interface Account {

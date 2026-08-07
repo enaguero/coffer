@@ -14,6 +14,7 @@ flips it to manual.
 
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -53,7 +54,10 @@ class FxRateOut(BaseModel):
     currency: str
     rate: Decimal
     as_of: date | None
-    source: str
+    # "manual" = hand-entered (the feed never touches it); "auto" = fetched by
+    # the opt-in feed. The Literal keeps the OpenAPI schema (and the frontend
+    # type mirroring it) honest.
+    source: Literal["manual", "auto"]
 
     model_config = {"from_attributes": True}
 
@@ -80,9 +84,12 @@ def _refresh_inputs(db, current: User) -> tuple[set[str], str | None]:
 
 @router.get("", response_model=list[FxRateOut])
 def list_rates(current: CurrentUser, db: DbSession) -> list[FxRate]:
-    # Opportunistic refresh, gated here so the common opted-out path pays for
-    # zero extra queries — then a no-op unless auto rates are stale AND no
-    # failure cooldown is running (see services/fx_feed.py).
+    """List the user's saved rates, opportunistically refreshing stale auto
+    rows first — only when the user opted in (`fx_auto_refresh`); a failed
+    refresh degrades to last-known rates, never an error."""
+    # The opt-in gate lives here so the common opted-out path pays for zero
+    # extra queries — then a no-op unless auto rates are stale AND no failure
+    # cooldown is running (see services/fx_feed.py).
     if current.fx_auto_refresh:
         currencies_in_use, display = _refresh_inputs(db, current)
         refresh_user_rates(db, current, currencies_in_use, display)
@@ -91,6 +98,9 @@ def list_rates(current: CurrentUser, db: DbSession) -> list[FxRate]:
 
 @router.put("", response_model=list[FxRateOut])
 def upsert_rates(payload: list[FxRateIn], current: CurrentUser, db: DbSession) -> list[FxRate]:
+    """Create or update rates by hand. Every row saved here becomes
+    source="manual" — manual always wins: the auto feed never overwrites a
+    manual row, and its currency never triggers a fetch again."""
     # Last write wins for duplicate codes in one payload — the session doesn't
     # autoflush, so looping adds for the same currency would 500 on commit.
     by_currency = {item.currency: item for item in payload}
@@ -113,9 +123,10 @@ def upsert_rates(payload: list[FxRateIn], current: CurrentUser, db: DbSession) -
 
 @router.post("/refresh", response_model=FxRefreshOut)
 def refresh_rates(current: CurrentUser, db: DbSession) -> FxRefreshOut:
-    """Explicit refresh: bypasses the staleness check but NOT the failure
-    cooldown — a refreshed_count of 0 with auto rows present means the feed
-    skipped (cooldown) or failed; last-known rates keep serving either way."""
+    """Explicit refresh — requires the fx_auto_refresh opt-in (400 without
+    it). Bypasses the staleness check but NOT the failure cooldown — a
+    refreshed_count of 0 with auto rows present means the feed skipped
+    (cooldown) or failed; last-known rates keep serving either way."""
     if not current.fx_auto_refresh:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -138,16 +138,17 @@ def test_debt_plan_avalanche_saves_interest(auth_client) -> None:
 
 
 def test_networth_register_debts_carry_minimums_payoff_dates(auth_client) -> None:
-    """Register debts report an at-minimums payoff date from ONE minimums-only
-    simulator run; a debt whose interest outruns its minimum reports None."""
+    """Register debts report an at-minimums payoff date from an INDEPENDENT
+    minimums-only run per debt; a debt whose interest outruns its minimum
+    reports None. The payable debt takes 36 months on purpose — far past where
+    a joint simulator run, truncated by the runaway debt's divergence
+    bail-out, used to stop (which wrongly nulled payable debts' dates)."""
     client, headers, _ = auth_client
     _account(client, headers)
-    # 1000 at 0% with a 250/month minimum clears in 4 months — before the
-    # runaway debt below trips the baseline's growing-since-start bail-out.
     r = client.post(
         "/api/v1/debts",
         headers=headers,
-        json={"name": "Payable", "current_balance": "1000", "interest_rate_apr": "0", "minimum_payment": "250"},
+        json={"name": "Payable", "current_balance": "3600", "interest_rate_apr": "0", "minimum_payment": "100"},
     )
     assert r.status_code == 201, r.text
     # ~£83/month of interest at 99.9% APR outruns a £5 minimum — never clears.
@@ -162,6 +163,32 @@ def test_networth_register_debts_carry_minimums_payoff_dates(auth_client) -> Non
     by_name = {d["name"]: d for d in nw["register_debts"]}
     assert by_name["Payable"]["payoff_date"] is not None
     assert by_name["Unpayable"]["payoff_date"] is None
+
+
+def test_forecast_due_marker_uses_installment_for_amortized_debt(auth_client) -> None:
+    """Fixed-installment debts have no minimum_payment — their due-day marker
+    must carry the installment, not an amount-less annotation."""
+    client, headers, _ = auth_client
+    _account(client, headers)  # GBP → resolves the display currency
+    r = client.post(
+        "/api/v1/debts",
+        headers=headers,
+        json={
+            "name": "Car loan",
+            "repayment_type": "amortized",
+            "current_balance": "8000",
+            "installment_amount": "250.00",
+            "ends_on": "2029-06-01",
+            "interest_rate_apr": "7.5",
+            "due_day_of_month": 12,
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    f = client.get("/api/v1/insights/forecast", headers=headers).json()
+    marker = next(m for m in f["due_markers"] if m["name"] == "Car loan")
+    assert marker["minimum_payment"] is not None
+    assert float(marker["minimum_payment"]) == 250.0
 
 
 def test_networth_survives_fx_feed_failure(auth_client, monkeypatch) -> None:

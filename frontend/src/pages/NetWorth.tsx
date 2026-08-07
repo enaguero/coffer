@@ -12,7 +12,7 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { Account, Allowances, FxRate, NetWorth as NetWorthData } from "../api/types";
+import type { Account, Allowances, FxRate, FxRefreshOut, NetWorth as NetWorthData } from "../api/types";
 import {
   Badge,
   Button,
@@ -78,15 +78,17 @@ export default function NetWorth() {
   const setFxAutoRefresh = useMutation({
     mutationFn: async (fx_auto_refresh: boolean) => api.patch("/api/v1/auth/me", { fx_auto_refresh }),
     onSuccess: () => {
-      // Enabling lets the next /fx read pull fresh auto rates — refetch them.
-      // Invalidate before refresh() so a failed user refetch can't strand
-      // stale rates (mirrors setDisplayCurrency's ordering).
-      invalidateFx(["fx"]);
+      // Enabling lets the next /fx read pull fresh auto rates — refetch them
+      // AND the converted totals that depend on them, or the page keeps
+      // showing pre-toggle numbers. Invalidate before refresh() so a failed
+      // user refetch can't strand stale rates (mirrors setDisplayCurrency's
+      // ordering).
+      invalidateFx(["fx", "networth", "forecast"]);
       void refresh().catch(() => {});
     },
   });
   const refreshRates = useMutation({
-    mutationFn: async () => api.post("/api/v1/fx/refresh"),
+    mutationFn: async () => (await api.post<FxRefreshOut>("/api/v1/fx/refresh")).data,
     onSuccess: () => invalidateFx(["fx", "networth", "forecast"]),
   });
   const setDisplayCurrency = useMutation({
@@ -507,6 +509,15 @@ export default function NetWorth() {
                     {refreshRates.isError && (
                       <p className="mt-1 text-xs text-amber-600">
                         Refresh failed — showing last-known rates
+                        {newestAsOf ? ` from ${newestAsOf}` : ""}.
+                      </p>
+                    )}
+                    {/* A 200 with zero rows written means the feed skipped
+                        (failure cooldown) or fetched nothing usable — don't
+                        let the click look like it worked. */}
+                    {refreshRates.isSuccess && refreshRates.data.refreshed_count === 0 && (
+                      <p className="mt-1 text-xs text-amber-600">
+                        Nothing refreshed — showing last-known rates
                         {newestAsOf ? ` from ${newestAsOf}` : ""}.
                       </p>
                     )}

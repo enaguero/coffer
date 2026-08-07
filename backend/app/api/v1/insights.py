@@ -37,7 +37,12 @@ from app.services.account_loader import (
     sum_positive_inflows,
 )
 from app.services.analytics.allowances import compute_allowances, tax_year_bounds
-from app.services.analytics.debt_plan import DebtInput, convert_debt_inputs, simulate_payoff
+from app.services.analytics.debt_plan import (
+    FIXED_INSTALLMENT_TYPES,
+    DebtInput,
+    convert_debt_inputs,
+    minimums_payoff_dates,
+)
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
@@ -79,12 +84,21 @@ def forecast(
     items = detect_recurring(load_txn_lites(db, current.id, account_ids=included_ids))
     start = sum((current_balance(a).balance for a in in_display), Decimal("0"))
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
+
+    # A marker's amount is the debt's contractual payment: the installment for
+    # the fixed-installment types (whose minimum_payment is typically NULL),
+    # the minimum for revolving.
+    def _due_amount(d: Debt) -> Decimal | None:
+        if str(d.repayment_type) in FIXED_INSTALLMENT_TYPES and d.installment_amount is not None:
+            return d.installment_amount
+        return d.minimum_payment
+
     # Due markers share the calendar with display-currency amounts; debts tied
     # to a foreign-currency account — or carrying a foreign currency of their
-    # own — would render their minimums mislabeled.
+    # own — would render their payments mislabeled.
     currency_of = {a.id: a.currency for a in account_data}
     due_days = [
-        (d.name, d.due_day_of_month, d.minimum_payment)
+        (d.name, d.due_day_of_month, _due_amount(d))
         for d in debts
         if d.due_day_of_month is not None
         and (display is None or d.currency is None or d.currency == display)
@@ -108,18 +122,6 @@ def forecast(
     )
 
 
-def _minimums_payoff_dates(inputs: list[DebtInput], display: str | None, rates: dict[str, Decimal]) -> dict[int, date]:
-    """Cheap per-debt payoff dates: ONE minimums-only run over the convertible
-    debts (under minimums each debt just pays its own contractual amount, so
-    excluding the unconvertible ones can't shift anyone else's date). A debt
-    that never clears — or can't be converted — simply has no entry."""
-    pool, _excluded, _notes = convert_debt_inputs(inputs, display, rates)
-    if not pool:
-        return {}
-    result = simulate_payoff(pool, "minimum")
-    return {d.id: d.payoff_date for d in result.debts if d.payoff_date is not None}
-
-
 @router.get("/networth", response_model=NetWorthOut)
 def networth(
     current: CurrentUser,
@@ -135,7 +137,12 @@ def networth(
     in_use = {a.currency for a in account_data} | {d.currency for d in debts if d.currency is not None}
     refresh_user_rates(db, current, in_use, display)
     rates = load_fx_rates(db, current.id)
-    payoff_by_id = _minimums_payoff_dates([DebtInput.from_model(d) for d in debts], display, rates)
+    # Per-debt at-minimums payoff dates over the convertible debts (under
+    # minimums each debt pays only its own contractual amount, so excluding
+    # the unconvertible ones can't shift anyone else's date). A debt that
+    # never clears — or can't be converted — reports no date.
+    pool, _excluded, _notes = convert_debt_inputs([DebtInput.from_model(d) for d in debts], display, rates)
+    payoff_by_id = minimums_payoff_dates(pool)
     report = compute_net_worth(
         account_data,
         [(d.id, d.name, d.current_balance, d.account_id, d.currency, payoff_by_id.get(d.id)) for d in debts],

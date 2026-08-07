@@ -33,6 +33,12 @@ from app.services.analytics.fx import convert, convert_optional
 
 TWO_DP = Decimal("0.01")
 MAX_MONTHS = 600
+# Divergence bail-out: once total outstanding exceeds this multiple of the
+# starting total the run can never clear — interest has outrun the budget.
+# Stopping there matters beyond wasted work: a runaway balance compounds
+# exponentially, and 600 months of that overflows Decimal arithmetic
+# (decimal.InvalidOperation) long before the loop would end on its own.
+DIVERGENCE_FACTOR = Decimal("10")
 # Hoisted APR-divisor constants — monthly_interest runs inside the simulator's
 # month loop, so it shouldn't re-parse Decimal strings every call.
 PCT = Decimal("100")
@@ -505,10 +511,19 @@ def simulate_payoff(
         series.append((month_date, sum((b for b in balances.values() if b > 0), Decimal("0"))))
 
         # If nothing can ever be paid off (interest outruns budget), bail out.
+        # Minimums-only: the cheap exact check — the balance stopped shrinking
+        # and has grown past month 1's total.
         if strategy == "minimum" and month > 1 and series[-1][1] >= series[-2][1] > 0:
             outstanding = series[-1][1]
             if outstanding > series[1][1]:  # growing since the start
                 break
+        # Every strategy: once outstanding exceeds DIVERGENCE_FACTOR × the
+        # starting total the run is unpayable — stop before the exponential
+        # growth overflows Decimal (see the constant). The post-loop
+        # `unpayable` check reads the surviving balances, so breaking here
+        # reports unpayable=True with the fields truncated as usual.
+        if series[-1][1] > series[0][1] * DIVERGENCE_FACTOR > 0:
+            break
 
     unpayable = any(b > 0 for b in balances.values())
     debt_free = None if unpayable else add_months(start, month)
@@ -543,6 +558,20 @@ def simulate_payoff(
         schedule=schedule,
         pruned=pruned,
     )
+
+
+def minimums_payoff_dates(debts: list[DebtInput], start: date | None = None) -> dict[int, date | None]:
+    """Each debt's payoff date paying only its own contractual amount — one
+    INDEPENDENT minimums-only run per debt. Under minimums no payment ever
+    rolls between debts, so per-debt runs are exact; a joint run would let one
+    runaway debt trip the divergence bail-out and truncate the simulation
+    before slower-but-payable debts record their dates. None = never clears
+    (or already cleared: a zero balance simulates to nothing)."""
+    dates: dict[int, date | None] = {}
+    for d in debts:
+        result = simulate_payoff([d], "minimum", start=start)
+        dates[d.id] = result.debts[0].payoff_date if result.debts else None
+    return dates
 
 
 def compare_strategies(

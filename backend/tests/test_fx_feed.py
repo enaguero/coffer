@@ -241,6 +241,53 @@ def test_provider_missing_currency_stays_unconverted(auth_client, monkeypatch) -
     assert len(calls) == 1
 
 
+def test_db_failure_mid_refresh_rolls_back_and_keeps_session_usable(auth_client, monkeypatch, db_session) -> None:
+    """A failure past the fetch, mid-DB-write, leaves the session in a failed
+    transaction — refresh_user_rates' except block must roll it back so the
+    calling request (and any later query on the same session) still works.
+    Without the rollback the very SELECT that lists the rates would die on a
+    poisoned session."""
+    from sqlalchemy import text as sa_text
+
+    client, headers, user_id = auth_client
+    _settings(client, headers, display_currency="GBP", fx_auto_refresh=True)
+    _add_account(client, headers, "GBP")
+    _add_account(client, headers, "CLP")
+    calls = _install_feed(monkeypatch, _payload({"CLP": 1250.0}))
+
+    class _BoomStmt:
+        """Duck-types the pg_insert chain but executes invalid SQL, so the
+        failure happens at the DB layer — a genuinely failed transaction, not
+        a plain Python exception before any DB work."""
+
+        class excluded:
+            rate = None
+            as_of = None
+
+        def values(self, rows):
+            return self
+
+        def on_conflict_do_update(self, **kwargs):
+            return self
+
+        def returning(self, *cols):
+            return sa_text("SELECT * FROM fx_feed_rollback_probe_missing_table")
+
+    monkeypatch.setattr(fx_feed, "pg_insert", lambda model: _BoomStmt())
+
+    # The endpoint survives: the refresh fails, the rollback restores the
+    # session, and the same request's SELECT serves last-known (here: no) rates.
+    r = client.get("/api/v1/fx", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+    assert len(calls) == 1  # the fetch happened — the failure was mid-upsert
+
+    # The shared session is usable again: a direct query and another request
+    # both succeed (without the rollback: PendingRollbackError).
+    assert db_session.scalars(select(FxRate).where(FxRate.user_id == user_id)).all() == []
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+
+
 # -------------------------------------------------------- POST /fx/refresh
 
 

@@ -26,7 +26,7 @@ import {
 import { api } from "../api/client";
 import GettingStarted from "../components/GettingStarted";
 import type { AccountCoverage, BudgetMonthView, DebtSummary, Goal, Surplus } from "../api/types";
-import { Badge, Card, EmptyState, PageHeader, ProgressBar, StatCard } from "../components/ui";
+import { Badge, Card, EmptyState, PageHeader, ProgressBar, StatCard, WarningBanner } from "../components/ui";
 import { CHART_COLORS, fmtMoney, MONTH_NAMES, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
 
@@ -72,7 +72,12 @@ export default function Dashboard() {
   const netCashflow =
     toNum(monthView.data?.income_actual) - toNum(monthView.data?.expenses_actual);
 
+  // Pie slices sum raw balances, so only display-denominated debts belong:
+  // currency null-or-display, and actually converted (mirrors Debts.tsx's
+  // displayItems). A foreign balance summed raw would distort every share.
+  // The header total stays the server's converted total_owed.
   const debtSlices = (debts.data?.by_debt ?? [])
+    .filter((d) => (!d.currency || d.currency === currency) && d.converted !== false)
     .map((d) => ({ name: d.name, value: toNum(d.current_balance) }))
     .filter((d) => d.value > 0)
     .sort((a, b) => b.value - a.value);
@@ -114,6 +119,14 @@ export default function Dashboard() {
             </div>
           ))}
         </div>
+      )}
+
+      {(debts.data?.excluded_currencies.length ?? 0) > 0 && (
+        <WarningBanner className="mb-4">
+          Debts in {debts.data?.excluded_currencies.join(", ")} are{" "}
+          <strong>excluded from the debt total and breakdown</strong> — no exchange rate saved.
+          Add rates on the Net worth page.
+        </WarningBanner>
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

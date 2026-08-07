@@ -14,6 +14,7 @@ from app.services.analytics.debt_plan import (
     expected_payment,
     infer_statement_rate,
     marginal_rate,
+    minimums_payoff_dates,
     monthly_interest,
     simulate_payoff,
 )
@@ -133,6 +134,18 @@ def test_missing_minimum_gets_assumption() -> None:
     debts = [_card(minimum=None)]
     result = simulate_payoff(debts, "avalanche", Decimal("100"), start=START)
     assert result.assumptions and "no minimum payment" in result.assumptions[0]
+
+
+def test_minimums_payoff_dates_isolate_runaway_debt() -> None:
+    # Each debt is simulated INDEPENDENTLY at minimums: 3600 at 0% with a 100
+    # minimum clears in exactly 36 months even alongside a runaway debt. A
+    # joint run would let the runaway balance trip the divergence bail-out
+    # around month 10 and wrongly null the payable debt's date.
+    payable = _card(id=1, name="Payable", balance="3600", apr="0", minimum="100")
+    runaway = _card(id=2, name="Runaway", balance="1000", apr="99.9", minimum="5")
+    dates = minimums_payoff_dates([payable, runaway], start=START)
+    assert dates[1] == add_months(START, 36)
+    assert dates[2] is None
 
 
 # ---- Repayment-type mechanics -------------------------------------------------
@@ -327,32 +340,89 @@ def test_optimal_never_worse_than_any_strategy_on_mixed_portfolio() -> None:
     assert winner.months <= comparison["minimum"].months
 
 
-def test_optimizer_promo_cliff_regression_never_worse_than_avalanche() -> None:
-    # Review counterexample: dynamic avalanche retargets at the promo cliff and
-    # can beat every static ordering — the candidate-set union guarantees the
-    # optimal run is never worse than it.
+def test_optimizer_promo_cliff_regression_strictly_beats_every_strategy() -> None:
+    # Staggered promo cliffs: the payoff order that clears each card inside its
+    # 0% window beats dynamic avalanche (which chases the highest CURRENT rate
+    # and burns the windows). STRICT inequalities on purpose — "optimal ≤
+    # avalanche" holds by construction (the candidate set unions the strategy
+    # runs), so only strict < proves the ordering search itself contributes:
+    # delete the candidate search and this test fails.
     debts = [
-        _card(id=1, name="Big card", balance="20000", apr="30", minimum="400"),
+        _card(
+            id=1,
+            name="Card A",
+            balance="14250",
+            apr="28",
+            minimum="880",
+            promo_apr=Decimal("0"),
+            promo_ends_on=add_months(START, 6),
+        ),
+        _card(
+            id=2,
+            name="Card B",
+            balance="26500",
+            apr="23",
+            minimum="650",
+            promo_apr=Decimal("0"),
+            promo_ends_on=add_months(START, 21),
+        ),
+        _card(
+            id=3,
+            name="Card C",
+            balance="7250",
+            apr="24",
+            minimum="250",
+            promo_apr=Decimal("0"),
+            promo_ends_on=add_months(START, 13),
+        ),
+    ]
+    winner, comparison = optimize(debts, extra_monthly=Decimal("200"), start=START)
+    assert not winner.unpayable
+    for name, run in comparison.items():
+        assert not run.unpayable, name  # every strategy actually computed
+        assert winner.total_interest < run.total_interest, name
+
+
+def test_optimizer_finds_payable_ordering_when_every_strategy_diverges() -> None:
+    # The promo card reverts to a brutal 40%: avalanche feeds the 24% card
+    # during the 0% window and only turns to the promo card after the cliff —
+    # too late, it diverges; snowball and minimums fail too. The greedy
+    # candidate's promo lookahead attacks the promo card DURING the window,
+    # which is the only payable ordering. Before the fix, an unpayable
+    # avalanche run made the optimizer skip candidates entirely and report the
+    # whole portfolio unpayable.
+    debts = [
+        _card(id=1, name="Steady card", balance="19750", apr="24", minimum="410"),
         _card(
             id=2,
             name="Promo card",
-            balance="12000",
-            apr="32",
-            minimum="250",
+            balance="21500",
+            apr="40",
+            minimum="380",
             promo_apr=Decimal("0"),
-            promo_ends_on=add_months(START, 14),
+            promo_ends_on=add_months(START, 7),
         ),
     ]
-    winner, comparison = optimize(debts, extra_monthly=Decimal("350"), start=START)
-    avalanche = comparison["avalanche"]
-    assert not avalanche.unpayable and avalanche.total_interest > 0  # actually computed
+    winner, comparison = optimize(debts, extra_monthly=Decimal("225"), start=START)
+    for name, run in comparison.items():
+        assert run.unpayable, name
     assert not winner.unpayable
-    assert winner.total_interest <= avalanche.total_interest
-    assert winner.total_interest <= comparison["snowball"].total_interest
-    # Minimums alone can't cover the post-cliff interest here: the baseline is
-    # unpayable, and its truncated totals are not a valid comparison target
-    # (the existing no-savings-vs-unpayable-baseline convention).
-    assert comparison["minimum"].unpayable
+    assert winner.strategy == "optimal"
+    assert winner.debt_free_date is not None
+
+
+def test_runaway_apr_diverges_to_unpayable_without_crash() -> None:
+    # 292% APR on 500 with no minimum: the assumed max(2% of balance, £25)
+    # never dents ~£120/month of interest, so the balance compounds without
+    # bound. Before the all-strategy divergence bail-out this overflowed
+    # Decimal arithmetic (decimal.InvalidOperation) mid-simulation; now every
+    # run stops once outstanding exceeds 10× the starting total and reports
+    # unpayable.
+    debts = [_card(balance="500", apr="292", minimum=None)]
+    winner, comparison = optimize(debts, extra_monthly=Decimal("0"), start=START)
+    assert winner.unpayable
+    assert winner.debt_free_date is None
+    assert all(run.unpayable for run in comparison.values())
 
 
 def test_optimal_schedule_sums_to_budget_every_month() -> None:

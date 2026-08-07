@@ -180,6 +180,7 @@ def update_debt(debt_id: int, payload: DebtUpdate, current: CurrentUser, db: DbS
         ends_on=_merged("ends_on"),
         original_principal=_merged("original_principal"),
         current_balance=_merged("current_balance"),
+        creating=False,  # updates may zero a statement_only balance (paid off)
     )
     if violation:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=violation)

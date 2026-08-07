@@ -19,11 +19,16 @@ def repayment_type_violation(
     ends_on: date | None,
     original_principal: Decimal | None,
     current_balance: Decimal | None,
+    creating: bool = True,
 ) -> str | None:
     """The cross-field rules per repayment type; None when the shape is valid.
 
     Shared by DebtCreate's validator and the PATCH handler (which must check
-    the *merged* debt — a partial update can't see the missing half)."""
+    the *merged* debt — a partial update can't see the missing half, and
+    passes creating=False). The statement_only balance rule differs by phase:
+    a NEW statement-only debt needs a positive balance (the rate is inferred
+    from it), but an update may set it to 0 — paying one off must not 422 —
+    while a negative balance is always rejected."""
     repayment_type = DebtRepaymentType(repayment_type)
     if repayment_type == DebtRepaymentType.REVOLVING:
         return None
@@ -33,8 +38,11 @@ def repayment_type_violation(
         return f"{repayment_type.value} debts require ends_on"
     if repayment_type == DebtRepaymentType.FLAT and (original_principal is None or original_principal <= 0):
         return "flat debts require original_principal > 0 (interest is computed on it)"
-    if repayment_type == DebtRepaymentType.STATEMENT_ONLY and (current_balance is None or current_balance <= 0):
-        return "statement_only debts require current_balance > 0"
+    if repayment_type == DebtRepaymentType.STATEMENT_ONLY:
+        if creating and (current_balance is None or current_balance <= 0):
+            return "statement_only debts require current_balance > 0"
+        if current_balance is None or current_balance < 0:
+            return "statement_only debts require current_balance >= 0"
     return None
 
 

@@ -47,8 +47,9 @@ class Debt(Base, TimestampMixin):
     # kept before they carried a currency).
     currency: Mapped[str | None] = mapped_column(String(3))
     # Precedence: for the fixed-installment types (amortized/flat/statement_only)
-    # installment_amount supersedes minimum_payment everywhere downstream —
-    # simulator budget, surplus ranking, digest lines, seed invariant.
+    # installment_amount supersedes minimum_payment everywhere downstream that
+    # reads a contractual payment — the simulator budget (expected_payment),
+    # the forecast's due-day markers, and the seed's 40%-of-income invariant.
     # minimum_payment remains meaningful only for revolving debts.
     installment_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     due_day_of_month: Mapped[int | None] = mapped_column(SmallInteger)

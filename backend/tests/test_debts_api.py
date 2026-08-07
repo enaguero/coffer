@@ -119,15 +119,19 @@ def test_flat_requires_positive_original_principal(auth_client) -> None:
 
 def test_statement_only_requires_current_balance(auth_client) -> None:
     client, headers, _ = auth_client
-    r = _create_debt(
-        client,
-        headers,
-        repayment_type="statement_only",
-        installment_amount="120.00",
-        ends_on="2028-06-01",
-    )
-    assert r.status_code == 422
-    assert "current_balance" in r.text
+    # Missing (defaults to 0) and explicit zero both fail at CREATE — the rate
+    # is inferred from the balance, so a new statement-only debt needs one.
+    for balance in (None, "0"):
+        fields = {
+            "repayment_type": "statement_only",
+            "installment_amount": "120.00",
+            "ends_on": "2028-06-01",
+        }
+        if balance is not None:
+            fields["current_balance"] = balance
+        r = _create_debt(client, headers, **fields)
+        assert r.status_code == 422, r.text
+        assert "current_balance" in r.text
 
 
 def test_bad_currency_code_rejected(auth_client) -> None:
@@ -160,6 +164,62 @@ def test_patch_to_amortized_enforces_required_fields(auth_client) -> None:
     )
     assert r.status_code == 200, r.text
     assert r.json()["repayment_type"] == "amortized"
+
+
+def test_patch_statement_only_balance_to_zero_allowed(auth_client) -> None:
+    """Paying a statement-only debt off must not 422: the > 0 rule applies at
+    CREATE only — updates allow 0 and reject only negatives."""
+    client, headers, _ = auth_client
+    r = _create_debt(
+        client,
+        headers,
+        repayment_type="statement_only",
+        current_balance="500.00",
+        installment_amount="120.00",
+        ends_on="2028-06-01",
+    )
+    assert r.status_code == 201, r.text
+    debt_id = r.json()["id"]
+
+    r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={"current_balance": "0"})
+    assert r.status_code == 200, r.text
+    assert Decimal(r.json()["current_balance"]) == Decimal("0")
+
+    r = client.patch(f"/api/v1/debts/{debt_id}", headers=headers, json={"current_balance": "-1"})
+    assert r.status_code == 422
+    assert "current_balance" in r.text
+
+
+def test_patch_to_flat_requires_original_principal(auth_client) -> None:
+    """Switching type via PATCH validates the merged debt: flat needs a
+    positive original_principal (interest is computed on it)."""
+    client, headers, _ = auth_client
+    r = _create_debt(client, headers, current_balance="3000.00", minimum_payment="90.00")
+    assert r.status_code == 201, r.text
+    debt_id = r.json()["id"]
+
+    r = client.patch(
+        f"/api/v1/debts/{debt_id}",
+        headers=headers,
+        json={"repayment_type": "flat", "installment_amount": "180.00", "ends_on": "2028-01-01"},
+    )
+    assert r.status_code == 422
+    assert "original_principal" in r.text
+
+    # Nothing half-applied, and supplying the principal in the same PATCH works.
+    listed = client.get("/api/v1/debts", headers=headers).json()
+    assert next(d for d in listed if d["id"] == debt_id)["repayment_type"] == "revolving"
+    r = client.patch(
+        f"/api/v1/debts/{debt_id}",
+        headers=headers,
+        json={
+            "repayment_type": "flat",
+            "installment_amount": "180.00",
+            "ends_on": "2028-01-01",
+            "original_principal": "5000.00",
+        },
+    )
+    assert r.status_code == 200, r.text
 
 
 # ---- POST /debts/plan (optimal + schedule, honest conversion) -----------------

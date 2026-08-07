@@ -107,10 +107,12 @@ def optimize(
     statement_rates = {d.id: infer_statement_rate(d, start)[0] for d in live if d.repayment_type == "statement_only"}
 
     if comparison["avalanche"].unpayable:
-        # The full budget can't outrun the arithmetic under the best dynamic
-        # strategy — reordering priorities won't change that, and enumerating
-        # n! runs of 600 truncated months would be pure waste.
-        candidates: list[list[int]] = []
+        # Dynamic avalanche diverging does NOT mean every ordering does: a
+        # promo-cliff portfolio can be payable under a fixed priority that
+        # clears the promo debt before its rate reverts. Enumerating n! runs
+        # of truncated months would still be waste, so try just the greedy
+        # ordering — its promo lookahead targets exactly that case.
+        candidates: list[list[int]] = [_greedy_priority(optimizable, start)]
     elif len(optimizable) <= MAX_EXHAUSTIVE_DEBTS:
         candidates = [list(p) for p in permutations([d.id for d in optimizable])]
     else:

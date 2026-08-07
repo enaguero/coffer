@@ -23,6 +23,7 @@ is acceptable for this single-process app.
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -35,6 +36,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.fx_rate import RATE_MAX, RATE_QUANTUM, FxRate
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 FETCH_TIMEOUT_SECONDS = 3.0
 FAILURE_COOLDOWN_SECONDS = 15 * 60
@@ -137,7 +140,15 @@ def refresh_user_rates(
     """
     try:
         return _refresh_user_rates(db, user, currencies_in_use, display_currency, force=force)
-    except Exception:
+    except Exception as exc:
+        # A failure mid-upsert leaves the session in a failed-transaction
+        # state — roll back so the caller's NEXT query doesn't 500 on a
+        # poisoned session (the rollback itself must never raise here).
+        try:
+            db.rollback()
+        except Exception:
+            logger.warning("FX refresh rollback failed for user %s", user.id, exc_info=True)
+        logger.warning("FX refresh failed for user %s: %s", user.id, exc)
         _failure_cooldowns[user.id] = time.monotonic()
         return 0
 

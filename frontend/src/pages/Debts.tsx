@@ -257,6 +257,13 @@ function PlannerPanel({ currency, hasDebts }: { currency: string; hasDebts: bool
         </WarningBanner>
       )}
 
+      {plan.isError && (
+        <div className="mt-4 flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          {apiErrorDetail(plan.error, "The payoff plan couldn't be computed — check the extra amount and try again.")}
+        </div>
+      )}
+
       {chosen && baseline && (
         <>
           {chosen.unpayable && (
