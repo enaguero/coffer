@@ -1,7 +1,7 @@
 ---
 title: "feat: Debt mechanics, FX rate feeds, and payoff optimizer"
 type: feat
-status: active
+status: completed
 date: 2026-08-07
 origin: docs/brainstorms/2026-08-07-wealth-debt-payoff-requirements.md
 ---
