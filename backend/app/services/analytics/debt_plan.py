@@ -1,13 +1,23 @@
-"""Debt payoff simulation: avalanche / snowball / minimum-only, promo-APR
-aware, with one-off extra payments ("snowflakes").
+"""Debt payoff simulation: avalanche / snowball / minimum-only / fixed-priority,
+promo-APR aware, mechanics-aware per repayment type, with one-off extra
+payments ("snowflakes").
 
 Model (standard for payoff calculators):
-- Interest accrues monthly at effective_apr/12 on the running balance.
-- The total monthly budget is fixed: sum of starting minimum payments plus the
-  chosen extra. When a debt clears, its minimum rolls into the pool — that's
-  what makes snowball/avalanche outperform paying minimums forever.
-- The pool's remainder (after minimums) goes to one target debt: highest
-  effective APR today (avalanche) or smallest balance (snowball).
+- Interest accrues monthly per the debt's mechanics (`monthly_interest`):
+  effective rate × running balance for revolving/amortized, rate × original
+  principal for flat (stopping at ends_on), inferred rate × balance for
+  statement-only (the rate is inferred once at plan start and reused).
+- The total monthly budget is fixed: sum of starting contractual payments
+  (`expected_payment` — installments for fixed-installment types, resolved
+  minimums for revolving) plus the chosen extra. When a debt clears, its
+  payment rolls into the pool — that's what makes snowball/avalanche
+  outperform paying minimums forever.
+- The pool's remainder (after contractual payments) goes to one target debt:
+  highest current rate (avalanche), smallest balance (snowball), or the first
+  open debt in an explicit `priority` list (strategy="fixed" — the optimizer's
+  seam). Flat loans are never targeted: their interest is fixed on the
+  original principal, so prepaying saves nothing; when only flat loans remain
+  open the remainder is reported as per-month uncommitted surplus instead.
 - A promo window (promo_apr until promo_ends_on) applies while current; the
   simulation steps month by month, so the rate flips mid-plan exactly when the
   cliff hits.
@@ -86,6 +96,16 @@ class PromoCliff:
 
 
 @dataclass
+class ScheduleMonth:
+    """One simulated month: what each debt was paid, and what the budget
+    couldn't place (only flat loans still open, or everything cleared)."""
+
+    month: date
+    payments: dict[int, Decimal]  # debt_id -> amount paid this month (absent = nothing paid)
+    uncommitted: Decimal = Decimal("0")
+
+
+@dataclass
 class PlanResult:
     strategy: str
     months: int
@@ -99,6 +119,11 @@ class PlanResult:
     promo_cliffs: list[PromoCliff] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     unpayable: bool = False
+    # Per-debt per-month payments (uncommitted surplus rides on each row).
+    schedule: list[ScheduleMonth] = field(default_factory=list)
+    # True when the run was abandoned early because its running total interest
+    # exceeded the optimizer's incumbent bound — every other field is partial.
+    pruned: bool = False
 
 
 def add_months(d: date, months: int) -> date:
@@ -270,48 +295,84 @@ def marginal_rate(debt: DebtInput, on: date) -> Decimal:
     return effective_apr(debt, on)
 
 
+def _cascade_rate(debt: DebtInput, on: date, statement_rates: dict[int, Decimal]) -> Decimal:
+    """Avalanche's targeting rate: mechanics-aware, reusing the rates inferred
+    at plan start for statement-only debts (flat never reaches the cascade)."""
+    if debt.repayment_type == "statement_only":
+        return statement_rates.get(debt.id, Decimal("0"))
+    return effective_apr(debt, on)
+
+
 def simulate_payoff(
     debts: list[DebtInput],
-    strategy: str = "avalanche",  # "avalanche" | "snowball" | "minimum"
+    strategy: str = "avalanche",  # "avalanche" | "snowball" | "minimum" | "fixed"
     extra_monthly: Decimal = Decimal("0"),
     snowflakes: dict[int, Decimal] | None = None,  # 1-based month offset -> amount
     start: date | None = None,
+    *,
+    priority: list[int] | None = None,  # strategy="fixed": debt ids, first attacked first
+    interest_bound: Decimal | None = None,  # abort once running interest exceeds this (optimizer pruning)
 ) -> PlanResult:
     start = start or date.today()
     snowflakes = snowflakes or {}
     live = [d for d in debts if d.balance > 0]
 
-    minimums: dict[int, Decimal] = {}
+    payments_due: dict[int, Decimal] = {}
     assumptions: list[str] = []
     for d in live:
-        m, assumed = _resolved_minimum(d)
-        minimums[d.id] = m
-        if assumed:
-            assumptions.append(f"{d.name}: no minimum payment set — assumed max(2% of balance, £25) = {m}")
+        pay, note = expected_payment(d)
+        payments_due[d.id] = pay
+        if note:
+            assumptions.append(note)
 
-    budget = sum(minimums.values(), Decimal("0")) + (extra_monthly if strategy != "minimum" else Decimal("0"))
+    # Statement-only rates are inferred once at plan start and reused every
+    # month — the entered terms don't change mid-plan.
+    statement_rates: dict[int, Decimal] = {}
+    for d in live:
+        if d.repayment_type == "statement_only":
+            rate, note = infer_statement_rate(d, start)
+            statement_rates[d.id] = rate
+            assumptions.append(note)
+
+    if strategy != "minimum":
+        for d in live:
+            if d.repayment_type == "flat":
+                assumptions.append(
+                    f"{d.name}: flat interest is charged on the original principal — prepaying saves no interest"
+                )
+
+    priority_rank = {debt_id: i for i, debt_id in enumerate(priority)} if priority else {}
+
+    budget = sum(payments_due.values(), Decimal("0")) + (extra_monthly if strategy != "minimum" else Decimal("0"))
     balances = {d.id: d.balance for d in live}
     interest_paid = {d.id: Decimal("0") for d in live}
     payoff_month: dict[int, int] = {}
     series: list[tuple[date, Decimal]] = [(start, sum(balances.values(), Decimal("0")))]
+    schedule: list[ScheduleMonth] = []
     total_interest = Decimal("0")
     total_paid = Decimal("0")
     cliffs: dict[int, PromoCliff] = {}
+    pruned = False
 
     month = 0
     while any(b > 0 for b in balances.values()) and month < MAX_MONTHS:
         month += 1
         month_date = add_months(start, month)
 
-        # 1) Accrue interest.
+        # 1) Accrue interest per the debt's mechanics.
         for d in live:
             if balances[d.id] <= 0:
                 continue
-            rate = effective_apr(d, month_date) / Decimal("100") / Decimal("12")
-            interest = (balances[d.id] * rate).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+            interest = monthly_interest(d, balances[d.id], month_date, statement_apr=statement_rates.get(d.id))
             balances[d.id] += interest
             interest_paid[d.id] += interest
             total_interest += interest
+
+        # Running interest only grows, so once past the incumbent bound this
+        # ordering can never win — abandon it (the caller discards the result).
+        if interest_bound is not None and total_interest > interest_bound:
+            pruned = True
+            break
 
         # Record promo-cliff exposure the first month after each promo ends.
         for d in live:
@@ -332,35 +393,53 @@ def simulate_payoff(
                     extra_yearly_interest=(balances[d.id] * apr / Decimal("100")).quantize(TWO_DP),
                 )
 
-        # 2) Pay minimums.
+        # 2) Pay each debt's contractual amount (installment or minimum).
         pool = budget + (snowflakes.get(month, Decimal("0")) if strategy != "minimum" else Decimal("0"))
+        paid_this_month: dict[int, Decimal] = {}
         for d in live:
             if balances[d.id] <= 0:
                 continue
-            pay = min(minimums[d.id], balances[d.id], pool)
+            pay = min(payments_due[d.id], balances[d.id], pool)
             balances[d.id] -= pay
             pool -= pay
             total_paid += pay
+            if pay > 0:
+                paid_this_month[d.id] = pay
             if balances[d.id] <= 0:
                 payoff_month.setdefault(d.id, month)
 
         # 3) Remainder attacks the target debt (then cascades to the next).
+        # Flat loans are never targeted — prepaying them saves no interest — so
+        # when only flat loans remain open the remainder stays in the pool and
+        # lands on the schedule row as uncommitted surplus.
         if strategy != "minimum":
             while pool > 0:
-                open_debts = [d for d in live if balances[d.id] > 0]
+                open_debts = [d for d in live if balances[d.id] > 0 and d.repayment_type != "flat"]
                 if not open_debts:
                     break
                 if strategy == "snowball":
                     target = min(open_debts, key=lambda d: (balances[d.id], d.id))
+                elif strategy == "fixed":
+                    target = min(open_debts, key=lambda d: priority_rank.get(d.id, len(priority_rank)))
                 else:  # avalanche
-                    target = max(open_debts, key=lambda d: (effective_apr(d, month_date), -balances[d.id]))
+                    target = max(
+                        open_debts, key=lambda d: (_cascade_rate(d, month_date, statement_rates), -balances[d.id])
+                    )
                 pay = min(pool, balances[target.id])
                 balances[target.id] -= pay
                 pool -= pay
                 total_paid += pay
+                paid_this_month[target.id] = paid_this_month.get(target.id, Decimal("0")) + pay
                 if balances[target.id] <= 0:
                     payoff_month.setdefault(target.id, month)
 
+        schedule.append(
+            ScheduleMonth(
+                month=month_date,
+                payments={debt_id: amount.quantize(TWO_DP) for debt_id, amount in paid_this_month.items()},
+                uncommitted=pool.quantize(TWO_DP),
+            )
+        )
         series.append((month_date, sum((b for b in balances.values() if b > 0), Decimal("0"))))
 
         # If nothing can ever be paid off (interest outruns budget), bail out.
@@ -371,6 +450,13 @@ def simulate_payoff(
 
     unpayable = any(b > 0 for b in balances.values())
     debt_free = None if unpayable else add_months(start, month)
+
+    # Post-ends_on overruns: entered terms that imply payoff after the stated
+    # end date get the reconciliation warning.
+    for d in live:
+        note = ends_on_overrun_assumption(d, add_months(start, payoff_month[d.id]) if d.id in payoff_month else None)
+        if note:
+            assumptions.append(note)
 
     return PlanResult(
         strategy=strategy,
@@ -392,6 +478,8 @@ def simulate_payoff(
         promo_cliffs=sorted(cliffs.values(), key=lambda c: c.promo_ends_on),
         assumptions=assumptions,
         unpayable=unpayable,
+        schedule=schedule,
+        pruned=pruned,
     )
 
 

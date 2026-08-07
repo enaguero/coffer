@@ -1,9 +1,11 @@
 """Unit tests for the analytics services — pure arithmetic, no DB."""
 
+import time
 from datetime import date
 from decimal import Decimal
 
 from app.models.account import AccountType
+from app.services.analytics.debt_optimizer import optimize
 from app.services.analytics.debt_plan import (
     DebtInput,
     add_months,
@@ -216,6 +218,253 @@ def test_marginal_rate_per_type() -> None:
     installment = _annuity_installment("5000", "0.015", 24)
     statement = _typed("statement_only", "5000", installment=str(installment), ends=add_months(START, 24))
     assert abs(marginal_rate(statement, START) - Decimal("18")) <= Decimal("0.05")
+
+
+# ---- Simulator mechanics + optimizer ------------------------------------------
+
+
+def _mixed_portfolio() -> list[DebtInput]:
+    """One debt of each repayment type, all comfortably payable."""
+    return [
+        _card(id=1, name="Card", balance="3000", apr="24.9", minimum="75"),
+        _typed(
+            "amortized", "10000", apr="12", installment="470.73", ends=add_months(START, 24), id=2, name="Amortized"
+        ),
+        _typed(
+            "flat", "6000", apr="10", installment="200", original="6000", ends=add_months(START, 30), id=3, name="Flat"
+        ),
+        _typed(
+            "statement_only",
+            "5000",
+            installment=str(_annuity_installment("5000", "0.015", 24)),
+            ends=add_months(START, 24),
+            id=4,
+            name="Statement",
+        ),
+    ]
+
+
+def test_simulate_fixed_installment_pays_installment_not_fallback() -> None:
+    debt = _typed("amortized", "10000", apr="12", installment="470.73", ends=add_months(START, 24), id=1)
+    result = simulate_payoff([debt], "avalanche", Decimal("0"), start=START)
+    # The contractual installment, not the 2%/£25 fallback (which would be 200).
+    assert result.monthly_budget == Decimal("470.73")
+    assert result.schedule[0].payments[1] == Decimal("470.73")
+    assert 23 <= result.months <= 25
+    assert not result.unpayable
+
+
+def test_simulate_statement_rate_inferred_once_and_labeled() -> None:
+    installment = _annuity_installment("5000", "0.015", 24)
+    debt = _typed("statement_only", "5000", installment=str(installment), ends=add_months(START, 24), id=1)
+    result = simulate_payoff([debt], "minimum", start=START)
+    assert any("estimated" in a.lower() for a in result.assumptions)
+    assert 23 <= result.months <= 25
+    assert not result.unpayable
+
+
+def test_simulate_extra_cascade_skips_flat_and_reports_uncommitted() -> None:
+    debts = [
+        _card(id=1, name="Card", balance="1000", apr="20", minimum="50"),
+        _typed(
+            "flat", "6000", apr="10", installment="150", original="6000", ends=add_months(START, 40), id=2, name="Flat"
+        ),
+    ]
+    result = simulate_payoff(debts, "avalanche", Decimal("100"), start=START)
+    assert not result.unpayable
+    assert result.monthly_budget == Decimal("300.00")  # 50 + 150 + 100
+    # The flat loan only ever receives its installment — never cascade extras.
+    assert all(m.payments.get(2, Decimal("0")) <= Decimal("150") for m in result.schedule)
+    # After the card clears, the remainder is uncommitted surplus, not a loop.
+    card_payoff = next(r for r in result.debts if r.id == 1).payoff_date
+    assert card_payoff is not None
+    tail = [m for m in result.schedule if m.month > card_payoff]
+    assert tail
+    assert all(m.uncommitted >= Decimal("150.00") for m in tail)
+
+
+def test_fixed_priority_seam_matches_static_avalanche_order() -> None:
+    # Two revolving debts with static rates: dynamic avalanche is exactly the
+    # static ordering [higher APR, lower APR], so the fixed seam must reproduce
+    # its numbers precisely.
+    debts = [_card(), _card(id=2, name="Loan", balance="8000", apr="6.5", minimum="160")]
+    fixed = simulate_payoff(debts, "fixed", Decimal("200"), start=START, priority=[1, 2])
+    avalanche = simulate_payoff(debts, "avalanche", Decimal("200"), start=START)
+    assert fixed.total_interest == avalanche.total_interest
+    assert fixed.months == avalanche.months
+    assert fixed.total_paid == avalanche.total_paid
+
+
+def test_optimizer_extras_go_to_card_not_flat_loan() -> None:
+    # AE4: spare capacity attacks the revolving card; the flat loan is withheld
+    # (its interest is fixed on the original principal) and the plan says why.
+    debts = [
+        _typed(
+            "flat",
+            "6000",
+            apr="10",
+            installment="200",
+            original="6000",
+            ends=add_months(START, 30),
+            id=1,
+            name="Flat loan",
+        ),
+        _card(id=2, name="Card", balance="3000", apr="24.9", minimum="75"),
+    ]
+    winner, _comparison = optimize(debts, extra_monthly=Decimal("150"), start=START)
+    assert winner.strategy == "optimal"
+    first = winner.schedule[0]
+    assert first.payments[2] == Decimal("225.00")  # 75 minimum + 150 extra
+    assert first.payments[1] == Decimal("200.00")  # installment only, never more
+    assert any("prepaying saves no interest" in a for a in winner.assumptions)
+
+
+def test_optimal_never_worse_than_any_strategy_on_mixed_portfolio() -> None:
+    winner, comparison = optimize(_mixed_portfolio(), extra_monthly=Decimal("200"), start=START)
+    assert not winner.unpayable
+    for name, run in comparison.items():
+        assert winner.total_interest <= run.total_interest, name
+    assert winner.months <= comparison["minimum"].months
+
+
+def test_optimizer_promo_cliff_regression_never_worse_than_avalanche() -> None:
+    # Review counterexample: dynamic avalanche retargets at the promo cliff and
+    # can beat every static ordering — the candidate-set union guarantees the
+    # optimal run is never worse than it.
+    debts = [
+        _card(id=1, name="Big card", balance="20000", apr="30", minimum="400"),
+        _card(
+            id=2,
+            name="Promo card",
+            balance="12000",
+            apr="32",
+            minimum="250",
+            promo_apr=Decimal("0"),
+            promo_ends_on=add_months(START, 14),
+        ),
+    ]
+    winner, comparison = optimize(debts, extra_monthly=Decimal("350"), start=START)
+    avalanche = comparison["avalanche"]
+    assert not avalanche.unpayable and avalanche.total_interest > 0  # actually computed
+    assert not winner.unpayable
+    assert winner.total_interest <= avalanche.total_interest
+    assert winner.total_interest <= comparison["snowball"].total_interest
+    # Minimums alone can't cover the post-cliff interest here: the baseline is
+    # unpayable, and its truncated totals are not a valid comparison target
+    # (the existing no-savings-vs-unpayable-baseline convention).
+    assert comparison["minimum"].unpayable
+
+
+def test_optimal_schedule_sums_to_budget_every_month() -> None:
+    debts = [
+        _card(id=1, name="Card", balance="1000", apr="20", minimum="50"),
+        _typed(
+            "flat", "6000", apr="10", installment="150", original="6000", ends=add_months(START, 40), id=2, name="Flat"
+        ),
+    ]
+    winner, _comparison = optimize(debts, extra_monthly=Decimal("100"), start=START)
+    assert len(winner.schedule) == winner.months
+    for m in winner.schedule:
+        assert sum(m.payments.values(), Decimal("0")) + m.uncommitted == winner.monthly_budget
+    # Months after the last non-flat debt clears keep the remainder visible.
+    assert any(m.uncommitted > 0 for m in winner.schedule)
+    assert winner.schedule[-1].uncommitted >= Decimal("150")
+
+
+def test_snowflake_improves_optimal_plan() -> None:
+    debts = _mixed_portfolio()
+    without, _ = optimize(debts, extra_monthly=Decimal("100"), start=START)
+    with_flake, _ = optimize(debts, extra_monthly=Decimal("100"), snowflakes={3: Decimal("500")}, start=START)
+    assert with_flake.total_interest < without.total_interest
+    assert with_flake.months <= without.months
+
+
+def test_all_flat_portfolio_degenerates_to_minimums_only() -> None:
+    debts = [
+        _typed(
+            "flat",
+            "6000",
+            apr="10",
+            installment="200",
+            original="6000",
+            ends=add_months(START, 30),
+            id=1,
+            name="Flat A",
+        ),
+        _typed(
+            "flat", "3000", apr="8", installment="150", original="3000", ends=add_months(START, 24), id=2, name="Flat B"
+        ),
+    ]
+    winner, comparison = optimize(debts, extra_monthly=Decimal("100"), start=START)
+    assert winner.strategy == "optimal"
+    assert winner.monthly_budget == comparison["minimum"].monthly_budget == Decimal("350.00")
+    assert winner.total_interest == comparison["minimum"].total_interest
+    assert winner.months == comparison["minimum"].months
+    assert any("prepaying saves no interest" in a for a in winner.assumptions)
+
+
+def test_optimizer_unpayable_portfolio_keeps_convention() -> None:
+    debts = [_card(balance="10000", apr="40", minimum="25")]
+    winner, comparison = optimize(debts, extra_monthly=Decimal("0"), start=START)
+    assert winner.unpayable
+    assert winner.debt_free_date is None
+    assert comparison["minimum"].unpayable
+
+
+def test_optimizer_falls_back_to_greedy_above_exhaustive_cutoff() -> None:
+    # 7 optimizable debts: enumeration (5040 runs) is skipped for the single
+    # greedy-by-marginal-rate candidate, still unioned with the strategy runs
+    # so the winner can never be worse than any of them.
+    debts = [
+        _card(id=i, name=f"Card {i}", balance=str(1000 + 400 * i), apr=str(Decimal("8") + 3 * i), minimum="120")
+        for i in range(1, 8)
+    ]
+    winner, comparison = optimize(debts, extra_monthly=Decimal("200"), start=START)
+    assert winner.strategy == "optimal"
+    assert not winner.unpayable
+    for name, run in comparison.items():
+        assert winner.total_interest <= run.total_interest, name
+
+
+def test_optimizer_six_debt_benchmark_under_budget() -> None:
+    debts = [
+        _card(id=1, name="Card A", balance="3000", apr="24.9", minimum="75"),
+        _card(id=2, name="Card B", balance="5000", apr="19.9", minimum="100"),
+        _card(
+            id=3,
+            name="Promo",
+            balance="4000",
+            apr="29.9",
+            minimum="80",
+            promo_apr=Decimal("0"),
+            promo_ends_on=add_months(START, 12),
+        ),
+        _typed("amortized", "10000", apr="12", installment="470.73", ends=add_months(START, 24), id=4, name="Loan A"),
+        _typed(
+            "amortized",
+            "8000",
+            apr="6",
+            installment=str(_annuity_installment("8000", "0.005", 36)),
+            ends=add_months(START, 36),
+            id=5,
+            name="Loan B",
+        ),
+        _typed(
+            "statement_only",
+            "5000",
+            installment=str(_annuity_installment("5000", "0.015", 24)),
+            ends=add_months(START, 24),
+            id=6,
+            name="Statement",
+        ),
+    ]
+    t0 = time.monotonic()
+    winner, comparison = optimize(debts, extra_monthly=Decimal("300"), start=START)
+    elapsed = time.monotonic() - t0
+    print(f"\n6-debt optimize() wall-clock: {elapsed:.2f}s")
+    assert elapsed < 5.0, f"optimize took {elapsed:.2f}s"
+    assert not winner.unpayable
+    assert winner.total_interest <= min(r.total_interest for r in comparison.values())
 
 
 # ---- Recurring detection ------------------------------------------------------
