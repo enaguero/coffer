@@ -37,12 +37,13 @@ from app.services.account_loader import (
     sum_positive_inflows,
 )
 from app.services.analytics.allowances import compute_allowances, tax_year_bounds
-from app.services.analytics.debt_plan import DebtInput
+from app.services.analytics.debt_plan import DebtInput, convert_debt_inputs, simulate_payoff
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
 from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
 from app.services.digest import compose_digest, send_email
+from app.services.fx_feed import refresh_user_rates
 
 router = APIRouter(prefix="/insights", tags=["insights"])
 
@@ -111,6 +112,18 @@ def forecast(
     )
 
 
+def _minimums_payoff_dates(inputs: list[DebtInput], display: str | None, rates: dict[str, Decimal]) -> dict[int, date]:
+    """Cheap per-debt payoff dates: ONE minimums-only run over the convertible
+    debts (under minimums each debt just pays its own contractual amount, so
+    excluding the unconvertible ones can't shift anyone else's date). A debt
+    that never clears — or can't be converted — simply has no entry."""
+    pool, _excluded, _notes = convert_debt_inputs(inputs, display, rates)
+    if not pool:
+        return {}
+    result = simulate_payoff(pool, "minimum")
+    return {d.id: d.payoff_date for d in result.debts if d.payoff_date is not None}
+
+
 @router.get("/networth", response_model=NetWorthOut)
 def networth(
     current: CurrentUser,
@@ -119,16 +132,26 @@ def networth(
 ) -> NetWorthOut:
     account_data = load_account_data(db, current.id)
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
+    display = resolve_display_currency(current, account_data)
+    # Opportunistic FX refresh, mirroring GET /fx: a no-op unless the user
+    # opted in, and any failure serves last-known rates — never a 500.
+    try:
+        in_use = {a.currency for a in account_data} | {d.currency for d in debts if d.currency is not None}
+        refresh_user_rates(db, current, in_use, display)
+    except Exception:
+        pass
+    rates = _fx_rates(db, current.id)
+    payoff_by_id = _minimums_payoff_dates([DebtInput.from_model(d) for d in debts], display, rates)
     report = compute_net_worth(
         account_data,
-        [(d.id, d.name, d.current_balance, d.account_id) for d in debts],
+        [(d.id, d.name, d.current_balance, d.account_id, d.currency, payoff_by_id.get(d.id)) for d in debts],
         months=months,
-        display_currency=resolve_display_currency(current, account_data),
-        rates=_fx_rates(db, current.id),
+        display_currency=display,
+        rates=rates,
     )
     return NetWorthOut(
         accounts=[asdict(b) for b in report.accounts],
-        register_debts=[{"id": d_id, "name": name, "balance": bal} for d_id, name, bal in report.register_debts],
+        register_debts=[asdict(d) for d in report.register_debts],
         assets=report.assets,
         liabilities=report.liabilities,
         net=report.net,

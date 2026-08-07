@@ -25,9 +25,11 @@ Model (standard for payoff calculators):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
+
+from app.services.analytics.fx import convert
 
 TWO_DP = Decimal("0.01")
 MAX_MONTHS = 600
@@ -124,6 +126,55 @@ class PlanResult:
     # True when the run was abandoned early because its running total interest
     # exceeded the optimizer's incumbent bound — every other field is partial.
     pruned: bool = False
+
+
+def convert_debt_inputs(
+    debts: list[DebtInput],
+    display_currency: str | None,
+    rates: dict[str, Decimal],
+) -> tuple[list[DebtInput], list[DebtInput], list[str]]:
+    """Honest-conversion split for simulation: (pool, excluded, assumptions).
+
+    The simulation runs entirely in the display currency, so a debt in another
+    currency either converts once at plan start (balance, minimum, installment,
+    original principal — at today's saved rate, stated in an assumption) or —
+    with no saved rate — is EXCLUDED from the pool entirely and flagged, never
+    silently mixed. Debts with no currency of their own are display-denominated
+    by convention and pass through; so does everything when no display currency
+    resolves (the legacy mixed-sum behavior)."""
+    pool: list[DebtInput] = []
+    excluded: list[DebtInput] = []
+    assumptions: list[str] = []
+    for d in debts:
+        if d.currency is None or display_currency is None or d.currency == display_currency:
+            pool.append(d)
+            continue
+        rate = rates.get(d.currency)
+        if rate is None or rate <= 0:
+            excluded.append(d)
+            assumptions.append(f"{d.name}: unconverted ({d.currency}) — excluded from plan")
+            continue
+        pool.append(
+            replace(
+                d,  # currency kept — per-debt outputs echo the debt's own currency
+                balance=convert(d.balance, d.currency, display_currency, rates),
+                minimum_payment=(
+                    convert(d.minimum_payment, d.currency, display_currency, rates)
+                    if d.minimum_payment is not None
+                    else None
+                ),
+                installment=(
+                    convert(d.installment, d.currency, display_currency, rates) if d.installment is not None else None
+                ),
+                original_principal=(
+                    convert(d.original_principal, d.currency, display_currency, rates)
+                    if d.original_principal is not None
+                    else None
+                ),
+            )
+        )
+        assumptions.append(f"{d.name}: amounts ≈ converted from {d.currency} to {display_currency} at today's rate")
+    return pool, excluded, assumptions
 
 
 def add_months(d: date, months: int) -> date:

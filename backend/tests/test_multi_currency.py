@@ -86,6 +86,56 @@ def test_net_worth_converts_liability_accounts() -> None:
     assert report.net == Decimal("180.00")
 
 
+# ------------------------------------------- register debts with a currency
+
+
+def test_net_worth_converts_register_debt_with_rate() -> None:
+    accounts = [_acc(1, "GBP", "1000")]
+    report = compute_net_worth(
+        accounts,
+        [(9, "Chile loan", Decimal("1000000"), None, "CLP", date(2027, 1, 15))],
+        months=3, today=date(2026, 6, 15),
+        display_currency="GBP", rates={"CLP": Decimal("0.00082")},
+    )
+    assert report.liabilities == Decimal("820.00")
+    assert report.excluded_currencies == []
+    debt = report.register_debts[0]
+    assert debt.converted is True
+    assert debt.currency == "CLP"
+    assert debt.balance == Decimal("1000000")  # stays native, like accounts
+    assert debt.payoff_date == date(2027, 1, 15)
+    # The converted value is held flat across the series.
+    assert report.series[-1].liabilities == Decimal("820.00")
+
+
+def test_net_worth_excludes_register_debt_without_rate() -> None:
+    accounts = [_acc(1, "GBP", "1000")]
+    report = compute_net_worth(
+        accounts,
+        [(9, "Chile loan", Decimal("1000000"), None, "CLP", None)],
+        months=3, today=date(2026, 6, 15), display_currency="GBP", rates={},
+    )
+    # Never summed raw — excluded from liabilities, flagged, still listed.
+    assert report.liabilities == Decimal("0.00")
+    assert report.net == Decimal("1000.00")
+    assert "CLP" in report.excluded_currencies
+    debt = report.register_debts[0]
+    assert debt.converted is False
+    assert debt.balance == Decimal("1000000")
+
+
+def test_net_worth_null_currency_register_debt_stays_display_denominated() -> None:
+    accounts = [_acc(1, "GBP", "1000")]
+    report = compute_net_worth(
+        accounts,
+        [(9, "Old loan", Decimal("400"), None, None, None)],
+        months=3, today=date(2026, 6, 15), display_currency="GBP", rates={},
+    )
+    assert report.liabilities == Decimal("400.00")
+    assert report.register_debts[0].converted is True
+    assert report.excluded_currencies == []
+
+
 # ------------------------------------------------------------- fx rates API
 
 
@@ -249,6 +299,31 @@ def test_networth_endpoint_defaults_to_most_common_currency(auth_client) -> None
     assert nw["display_currency"] == "GBP"
     assert nw["excluded_currencies"] == ["CLP"]
     assert Decimal(nw["assets"]) == Decimal("300.00")
+
+
+def test_networth_endpoint_converts_register_debt(auth_client) -> None:
+    client, headers, _ = auth_client
+    _account(client, headers, name="UK", currency="GBP", opening="1000")
+    client.patch("/api/v1/auth/me", headers=headers, json={"display_currency": "GBP"})
+    r = client.post(
+        "/api/v1/debts", headers=headers,
+        json={"name": "Chile loan", "current_balance": "1000000", "currency": "CLP"},
+    )
+    assert r.status_code == 201, r.text
+
+    # No rate: excluded from liabilities, flagged, currency listed.
+    nw = client.get("/api/v1/insights/networth", headers=headers).json()
+    assert nw["excluded_currencies"] == ["CLP"]
+    assert Decimal(nw["liabilities"]) == Decimal("0.00")
+    debt = nw["register_debts"][0]
+    assert debt["currency"] == "CLP"
+    assert debt["converted"] is False
+
+    client.put("/api/v1/fx", headers=headers, json=[{"currency": "CLP", "rate": 0.00082}])
+    nw = client.get("/api/v1/insights/networth", headers=headers).json()
+    assert nw["excluded_currencies"] == []
+    assert Decimal(nw["liabilities"]) == Decimal("820.00")
+    assert nw["register_debts"][0]["converted"] is True
 
 
 def test_forecast_endpoint_is_single_currency(auth_client) -> None:

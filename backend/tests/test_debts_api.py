@@ -1,5 +1,8 @@
 """API tests for debt CRUD: per-repayment-type conditional validation,
-per-debt currency, and the legacy (pre-mechanics) revolving shape."""
+per-debt currency, the legacy (pre-mechanics) revolving shape, the payoff
+planner (optimal + schedule, honest FX conversion), and the summary totals."""
+
+from decimal import Decimal
 
 
 def _create_debt(client, headers, **fields) -> dict:
@@ -157,6 +160,143 @@ def test_patch_to_amortized_enforces_required_fields(auth_client) -> None:
     )
     assert r.status_code == 200, r.text
     assert r.json()["repayment_type"] == "amortized"
+
+
+# ---- POST /debts/plan (optimal + schedule, honest conversion) -----------------
+
+
+def test_plan_mixed_portfolio_returns_optimal_with_schedule(auth_client) -> None:
+    client, headers, _ = auth_client
+    cases = [
+        {
+            "name": "Card",
+            "repayment_type": "revolving",
+            "current_balance": "3000.00",
+            "interest_rate_apr": "24.9",
+            "minimum_payment": "75.00",
+        },
+        {
+            "name": "Car loan",
+            "repayment_type": "amortized",
+            "current_balance": "8000.00",
+            "installment_amount": "250.00",
+            "ends_on": "2029-06-01",
+            "interest_rate_apr": "7.5",
+        },
+        {
+            "name": "Flat loan",
+            "repayment_type": "flat",
+            "original_principal": "5000.00",
+            "current_balance": "3000.00",
+            "installment_amount": "180.00",
+            "ends_on": "2028-01-01",
+            "interest_rate_apr": "12.0",
+        },
+        {
+            "name": "Statement loan",
+            "repayment_type": "statement_only",
+            "current_balance": "2400.00",
+            "installment_amount": "120.00",
+            "ends_on": "2028-06-01",
+        },
+    ]
+    for case in cases:
+        r = _create_debt(client, headers, **case)
+        assert r.status_code == 201, f"{case['name']}: {r.text}"
+
+    r = client.post("/api/v1/debts/plan", headers=headers, json={"extra_monthly": "200"})
+    assert r.status_code == 200, r.text
+    plan = r.json()
+    assert plan["excluded_currencies"] == []
+
+    optimal = plan["optimal"]
+    assert optimal["strategy"] == "optimal"
+    assert optimal["unpayable"] is False
+    assert len(optimal["debts"]) == 4
+    assert all(d["currency"] is None for d in optimal["debts"])
+    # Optimal is never worse than any displayed strategy.
+    assert float(optimal["total_interest"]) <= float(plan["avalanche"]["total_interest"])
+    # The statement-only rate is inferred, and the plan says so.
+    assert any("estimated" in a for a in optimal["assumptions"])
+
+    # Only the optimal plan carries the per-debt monthly schedule.
+    assert optimal["schedule"], "optimal plan must carry a schedule"
+    first = optimal["schedule"][0]
+    assert set(first) == {"month", "payments", "uncommitted"}
+    assert first["payments"], "month 1 pays the contractual amounts"
+    assert set(first["payments"][0]) == {"debt_id", "amount"}
+    for strategy in ("minimum", "snowball", "avalanche"):
+        assert plan[strategy]["schedule"] == []
+
+
+def test_plan_excludes_foreign_debt_without_rate(auth_client) -> None:
+    client, headers, _ = auth_client
+    client.patch("/api/v1/auth/me", headers=headers, json={"display_currency": "GBP"})
+    r = _create_debt(
+        client,
+        headers,
+        name="UK card",
+        current_balance="1000.00",
+        interest_rate_apr="24.9",
+        minimum_payment="50.00",
+    )
+    assert r.status_code == 201, r.text
+    r = _create_debt(
+        client,
+        headers,
+        name="Chile loan",
+        current_balance="1000000.00",
+        interest_rate_apr="30.0",
+        minimum_payment="50000.00",
+        currency="CLP",
+    )
+    assert r.status_code == 201, r.text
+    clp_id = r.json()["id"]
+
+    r = client.post("/api/v1/debts/plan", headers=headers, json={"extra_monthly": "100"})
+    assert r.status_code == 200, r.text
+    plan = r.json()
+    assert plan["excluded_currencies"] == ["CLP"]
+    # The CLP debt sits outside every simulation, and each plan says so.
+    for strategy in ("minimum", "snowball", "avalanche", "optimal"):
+        assert clp_id not in {d["id"] for d in plan[strategy]["debts"]}
+        assert any("unconverted (CLP)" in a for a in plan[strategy]["assumptions"])
+
+    # With a saved rate the debt joins the pool, converted at today's rate.
+    client.put("/api/v1/fx", headers=headers, json=[{"currency": "CLP", "rate": 0.001}])
+    plan = client.post("/api/v1/debts/plan", headers=headers, json={}).json()
+    assert plan["excluded_currencies"] == []
+    clp = next(d for d in plan["optimal"]["debts"] if d["id"] == clp_id)
+    assert clp["currency"] == "CLP"
+    assert any("converted from CLP" in a for a in plan["optimal"]["assumptions"])
+
+
+# ---- GET /debts/summary (display-currency totals) ------------------------------
+
+
+def test_summary_converts_rated_and_excludes_unrated_currencies(auth_client) -> None:
+    client, headers, _ = auth_client
+    client.patch("/api/v1/auth/me", headers=headers, json={"display_currency": "GBP"})
+    _create_debt(client, headers, name="UK card", current_balance="100.00")
+    r = _create_debt(client, headers, name="Chile loan", current_balance="1000000.00", currency="CLP")
+    assert r.status_code == 201, r.text
+    clp_id = r.json()["id"]
+
+    # No CLP rate: the CLP balance must never be summed raw into the total.
+    s = client.get("/api/v1/debts/summary", headers=headers).json()
+    assert Decimal(s["total_owed"]) == Decimal("100.00")
+    assert s["excluded_currencies"] == ["CLP"]
+    by_id = {d["id"]: d for d in s["by_debt"]}
+    assert by_id[clp_id]["converted"] is False
+    # Still listed with its raw balance in its own currency.
+    assert Decimal(by_id[clp_id]["current_balance"]) == Decimal("1000000.00")
+    assert by_id[clp_id]["currency"] == "CLP"
+
+    client.put("/api/v1/fx", headers=headers, json=[{"currency": "CLP", "rate": 0.00082}])
+    s = client.get("/api/v1/debts/summary", headers=headers).json()
+    assert Decimal(s["total_owed"]) == Decimal("920.00")  # 100 + 1,000,000 × 0.00082
+    assert s["excluded_currencies"] == []
+    assert all(d["converted"] for d in s["by_debt"])
 
 
 def test_legacy_debt_lists_as_revolving_with_null_currency(auth_client, db_session) -> None:

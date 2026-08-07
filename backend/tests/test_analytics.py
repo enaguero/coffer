@@ -595,7 +595,7 @@ def test_net_worth_combines_assets_liabilities_and_register() -> None:
     ]
     report = compute_net_worth(
         accounts,
-        register_debts=[(9, "Student loan", Decimal("5000"), None)],
+        register_debts=[(9, "Student loan", Decimal("5000"), None, None, None)],
         months=6,
         today=date(2026, 8, 1),
     )
@@ -609,7 +609,7 @@ def test_linked_register_debt_not_double_counted() -> None:
     accounts = [_acc(id=2, name="Card", type=AccountType.CREDIT_CARD, opening="-400")]
     report = compute_net_worth(
         accounts,
-        register_debts=[(9, "Card", Decimal("400"), 2)],  # linked to account 2
+        register_debts=[(9, "Card", Decimal("400"), 2, None, None)],  # linked to account 2
         months=3,
         today=date(2026, 8, 1),
     )

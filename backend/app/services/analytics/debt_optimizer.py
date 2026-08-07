@@ -87,9 +87,11 @@ def optimize(
 
     if not optimizable:
         # Nothing prepayment can improve: the optimal plan is the minimums-only
-        # baseline, with the reason on record.
+        # baseline, with the reason on record (unless there are no open debts
+        # at all — an empty pool has nothing to explain).
         base = comparison["minimum"]
-        return replace(base, strategy="optimal", assumptions=[*base.assumptions, ALL_FLAT_ASSUMPTION]), comparison
+        extra = [ALL_FLAT_ASSUMPTION] if live else []
+        return replace(base, strategy="optimal", assumptions=[*base.assumptions, *extra]), comparison
 
     best = min(comparison.values(), key=_key)
 

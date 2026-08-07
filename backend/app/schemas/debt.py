@@ -117,6 +117,9 @@ class DebtPlanDebtOut(BaseModel):
     name: str
     payoff_date: date | None
     interest_paid: Decimal
+    # The debt's own currency; None = the user's display currency. Simulation
+    # figures are display-denominated (converted once at plan start).
+    currency: str | None = None
 
 
 class PromoCliffOut(BaseModel):
@@ -133,6 +136,19 @@ class PlanSeriesPoint(BaseModel):
     balance: Decimal
 
 
+class SchedulePaymentOut(BaseModel):
+    debt_id: int
+    amount: Decimal
+
+
+class ScheduleMonthOut(BaseModel):
+    month: date
+    payments: list[SchedulePaymentOut]
+    # Budget the month couldn't place: only flat loans still open (prepaying
+    # them saves nothing), or everything already cleared.
+    uncommitted: Decimal
+
+
 class PlanOut(BaseModel):
     strategy: str
     months: int
@@ -147,9 +163,16 @@ class PlanOut(BaseModel):
     promo_cliffs: list[PromoCliffOut]
     assumptions: list[str]
     unpayable: bool
+    # Per-debt monthly payments. Populated only for the optimal plan — the
+    # comparison strategies return an empty list to keep payloads bounded.
+    schedule: list[ScheduleMonthOut] = Field(default_factory=list)
 
 
 class PlanCompareOut(BaseModel):
     minimum: PlanOut
     snowball: PlanOut
     avalanche: PlanOut
+    optimal: PlanOut
+    # Debt currencies with no saved FX rate — those debts sit outside every
+    # simulation above (honest conversion, mirroring net worth).
+    excluded_currencies: list[str] = Field(default_factory=list)

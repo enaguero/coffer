@@ -2,28 +2,54 @@ from dataclasses import asdict
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
+from app.models.account import Account
 from app.models.debt import Debt
+from app.models.fx_rate import FxRate
 from app.schemas.debt import (
     DebtCreate,
     DebtOut,
+    DebtPlanDebtOut,
     DebtUpdate,
     PlanCompareOut,
     PlanOut,
     PlanRequest,
+    ScheduleMonthOut,
+    SchedulePaymentOut,
     repayment_type_violation,
 )
-from app.services.analytics.debt_plan import DebtInput, PlanResult, compare_strategies
+from app.services.account_loader import resolve_display_currency
+from app.services.analytics.debt_optimizer import optimize
+from app.services.analytics.debt_plan import DebtInput, PlanResult, convert_debt_inputs
+from app.services.analytics.fx import convert
 
 router = APIRouter(prefix="/debts", tags=["debts"])
 
 
+class DebtSummaryItemOut(DebtOut):
+    # False = balance held in a foreign currency with no saved FX rate — the
+    # debt is listed (raw balance + currency) but excluded from total_owed.
+    converted: bool = True
+
+
 class DebtSummary(BaseModel):
+    # Display-currency total over convertible debts only — never a raw sum
+    # across currencies.
     total_owed: Decimal
-    by_debt: list[DebtOut]
+    by_debt: list[DebtSummaryItemOut]
+    excluded_currencies: list[str] = Field(default_factory=list)
+
+
+def _display_and_rates(db, current) -> tuple[str | None, dict[str, Decimal]]:
+    """The display currency + saved FX rates, resolved the way insights does
+    (rows expose .type/.currency — all resolve_display_currency reads)."""
+    account_rows = db.execute(select(Account.type, Account.currency).where(Account.user_id == current.id)).all()
+    display = resolve_display_currency(current, account_rows)
+    rates = {r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == current.id))}
+    return display, rates
 
 
 @router.get("", response_model=list[DebtOut])
@@ -34,11 +60,34 @@ def list_debts(current: CurrentUser, db: DbSession) -> list[Debt]:
 @router.get("/summary", response_model=DebtSummary)
 def debt_summary(current: CurrentUser, db: DbSession) -> DebtSummary:
     debts = list(db.scalars(select(Debt).where(Debt.user_id == current.id).order_by(Debt.name)))
-    total = db.scalar(select(func.coalesce(func.sum(Debt.current_balance), 0)).where(Debt.user_id == current.id))
-    return DebtSummary(total_owed=Decimal(total or 0), by_debt=debts)
+    display, rates = _display_and_rates(db, current)
+    total = Decimal("0")
+    excluded: set[str] = set()
+    items: list[DebtSummaryItemOut] = []
+    for d in debts:
+        item = DebtSummaryItemOut.model_validate(d)
+        if d.currency is None or display is None or d.currency == display:
+            total += d.current_balance
+        else:
+            value = convert(d.current_balance, d.currency, display, rates)
+            if value is None:
+                item.converted = False
+                excluded.add(d.currency)
+            else:
+                total += value
+        items.append(item)
+    return DebtSummary(total_owed=total, by_debt=items, excluded_currencies=sorted(excluded))
 
 
-def _plan_out(result: PlanResult, baseline: PlanResult | None) -> PlanOut:
+def _plan_out(
+    result: PlanResult,
+    baseline: PlanResult | None,
+    *,
+    currency_by_id: dict[int, str | None] | None = None,
+    extra_assumptions: list[str] | None = None,
+    include_schedule: bool = False,
+) -> PlanOut:
+    currency_by_id = currency_by_id or {}
     return PlanOut(
         strategy=result.strategy,
         months=result.months,
@@ -56,27 +105,58 @@ def _plan_out(result: PlanResult, baseline: PlanResult | None) -> PlanOut:
         months_saved_vs_minimum=(
             baseline.months - result.months if baseline and not baseline.unpayable and not result.unpayable else None
         ),
-        debts=[asdict(d) for d in result.debts],
+        debts=[
+            DebtPlanDebtOut(
+                id=d.id,
+                name=d.name,
+                payoff_date=d.payoff_date,
+                interest_paid=d.interest_paid,
+                currency=currency_by_id.get(d.id),
+            )
+            for d in result.debts
+        ],
         balance_series=[{"on": on, "balance": b} for on, b in result.balance_series],
         promo_cliffs=[asdict(c) for c in result.promo_cliffs],
-        assumptions=result.assumptions,
+        assumptions=[*result.assumptions, *(extra_assumptions or [])],
         unpayable=result.unpayable,
+        schedule=(
+            [
+                ScheduleMonthOut(
+                    month=m.month,
+                    payments=[
+                        SchedulePaymentOut(debt_id=debt_id, amount=amount)
+                        for debt_id, amount in sorted(m.payments.items())
+                    ],
+                    uncommitted=m.uncommitted,
+                )
+                for m in result.schedule
+            ]
+            if include_schedule
+            else []
+        ),
     )
 
 
 @router.post("/plan", response_model=PlanCompareOut)
 def plan_payoff(payload: PlanRequest, current: CurrentUser, db: DbSession) -> PlanCompareOut:
     """Simulate paying off all open debts: minimums-only baseline vs snowball
-    vs avalanche with the requested extra budget and one-off payments."""
+    vs avalanche vs the optimizer's best ordering, with the requested extra
+    budget and one-off payments. The whole simulation runs in the display
+    currency: foreign-currency debts convert once at plan start (saved rates),
+    and debts with no rate are excluded from the pool and flagged."""
     debts = list(db.scalars(select(Debt).where(Debt.user_id == current.id)))
-    inputs = [DebtInput.from_model(d) for d in debts]
+    display, rates = _display_and_rates(db, current)
+    pool, excluded, fx_notes = convert_debt_inputs([DebtInput.from_model(d) for d in debts], display, rates)
     snowflakes = {s.month: s.amount for s in payload.snowflakes}
-    results = compare_strategies(inputs, payload.extra_monthly, snowflakes)
+    optimal, results = optimize(pool, payload.extra_monthly, snowflakes)
     baseline = results["minimum"]
+    shared = {"currency_by_id": {d.id: d.currency for d in debts}, "extra_assumptions": fx_notes}
     return PlanCompareOut(
-        minimum=_plan_out(baseline, None),
-        snowball=_plan_out(results["snowball"], baseline),
-        avalanche=_plan_out(results["avalanche"], baseline),
+        minimum=_plan_out(baseline, None, **shared),
+        snowball=_plan_out(results["snowball"], baseline, **shared),
+        avalanche=_plan_out(results["avalanche"], baseline, **shared),
+        optimal=_plan_out(optimal, baseline, include_schedule=True, **shared),
+        excluded_currencies=sorted({d.currency for d in excluded}),
     )
 
 
