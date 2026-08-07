@@ -59,6 +59,21 @@ class NetWorthPoint:
     net: Decimal
 
 
+@dataclass
+class RegisterDebt:
+    """A register debt not linked to a tracked account, as reported."""
+
+    id: int
+    name: str
+    balance: Decimal  # in the debt's own currency
+    currency: str | None  # None = the display currency by convention
+    # Included in the liability totals? False when no FX rate exists.
+    converted: bool
+    # Payoff at contractual minimums (from the payoff simulator); None when
+    # the debt never clears, or couldn't be simulated (no FX rate).
+    payoff_date: date | None
+
+
 def _derived_at(acc: AccountData, on: date) -> Decimal:
     total = acc.opening_balance
     for posted, amount in acc.txns:
@@ -124,19 +139,20 @@ class NetWorthReport:
     accounts: list[AccountBalance]
     # Debts from the register that are NOT linked to a tracked account
     # (linked ones are already counted through their account's balance).
-    register_debts: list[tuple[int, str, Decimal]]
+    register_debts: list[RegisterDebt]
     assets: Decimal
     liabilities: Decimal
     net: Decimal
     series: list[NetWorthPoint]
     display_currency: str | None = None
-    # Currencies with accounts that could NOT be converted (no rate saved).
+    # Currencies with accounts or debts that could NOT be converted (no rate).
     excluded_currencies: list[str] = field(default_factory=list)
 
 
 def compute_net_worth(
     accounts: list[AccountData],
-    register_debts: list[tuple[int, str, Decimal, int | None]],  # (id, name, balance, account_id)
+    # (id, name, balance, account_id, currency, payoff_date)
+    register_debts: list[tuple[int, str, Decimal, int | None, str | None, date | None]],
     months: int = 24,
     today: date | None = None,
     display_currency: str | None = None,
@@ -165,12 +181,28 @@ def compute_net_worth(
         return got
 
     convertible = {a.id: has_rate(a.currency) for a in accounts}
-    excluded = sorted({a.currency for a in accounts if not convertible[a.id]})
+    excluded_set = {a.currency for a in accounts if not convertible[a.id]}
     tracked_ids = {a.id for a in accounts}
-    unlinked = [
-        (d_id, name, bal) for d_id, name, bal, acc_id in register_debts if acc_id is None or acc_id not in tracked_ids
-    ]
-    unlinked_total = sum((bal for _, _, bal in unlinked), Decimal("0"))
+    # Unlinked register debts follow the same honest-conversion rule as
+    # accounts: NULL currency = display by convention, a saved rate converts
+    # (the converted value held flat across the series), no rate = excluded
+    # from the liability totals and flagged.
+    unlinked: list[RegisterDebt] = []
+    unlinked_total = Decimal("0")
+    for d_id, name, bal, acc_id, currency, payoff_date in register_debts:
+        if acc_id is not None and acc_id in tracked_ids:
+            continue  # already counted through the linked account's balance
+        debt_converted = currency is None or has_rate(currency)
+        if debt_converted:
+            unlinked_total += to_display(bal, currency) if currency is not None else bal
+        else:
+            excluded_set.add(currency)
+        unlinked.append(
+            RegisterDebt(
+                id=d_id, name=name, balance=bal, currency=currency, converted=debt_converted, payoff_date=payoff_date
+            )
+        )
+    excluded = sorted(excluded_set)
 
     balances = [current_balance(a, today) for a in accounts]
     for b in balances:
@@ -184,7 +216,7 @@ def compute_net_worth(
         (-to_display(b.balance, b.currency) for b in balances if b.type in LIABILITY_TYPES and b.converted),
         Decimal("0"),
     )
-    # Register debts carry no currency of their own — treated as display currency.
+    # unlinked_total is already display-denominated (converted or by convention).
     liabilities = account_liabilities + unlinked_total
 
     series: list[NetWorthPoint] = []
@@ -201,7 +233,8 @@ def compute_net_worth(
             (-series_balance(acc, on) for acc in accounts if acc.type in LIABILITY_TYPES and convertible[acc.id]),
             Decimal("0"),
         )
-        # Register debts have no dated history — held flat at today's balance.
+        # Register debts have no dated history — today's (converted) balance
+        # is held flat across the series.
         liab = acc_liab + unlinked_total
         series.append(
             NetWorthPoint(

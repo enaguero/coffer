@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.services.analytics.debt_plan import DebtInput, effective_apr
+from app.services.analytics.debt_plan import DebtInput, marginal_rate, prepayable
+from app.services.analytics.fx import convert_optional
 
 TWO_DP = Decimal("0.01")
 
@@ -96,22 +97,52 @@ def rank_allocations(
     goals: list[tuple[int, str, Decimal, Decimal, date | None]],  # (id, name, target, current, target_date)
     monthly_floor: Decimal | None,
     today: date | None = None,
+    display_currency: str | None = None,
+    rates: dict[str, Decimal] | None = None,
 ) -> list[AllocationOption]:
     today = today or date.today()
+    rates = rates or {}
     options: list[AllocationOption] = []
+    unconverted: list[AllocationOption] = []
 
-    for d in sorted(debts, key=lambda d: effective_apr(d, today), reverse=True):
+    rate_of = {d.id: marginal_rate(d, today) for d in debts}
+    for d in sorted(debts, key=lambda d: rate_of[d.id], reverse=True):
         if d.balance <= 0:
             continue
-        apr = effective_apr(d, today)
-        applied = min(amount, d.balance)
+        # Foreign-currency balances convert at the saved rate; without one the
+        # debt is excluded from the figures and flagged — never silently mixed.
+        balance = convert_optional(d.balance, d.currency, display_currency, rates)
+        if balance is None:
+            unconverted.append(
+                AllocationOption(
+                    kind="debt",
+                    target_id=d.id,
+                    name=d.name,
+                    apr=None,
+                    yearly_interest_saved=None,
+                    months_earlier=None,
+                    runway_months_gained=None,
+                    note=f"Balance held in {d.currency} with no saved FX rate — excluded from the figures",
+                )
+            )
+            continue
+        converted_suffix = "" if balance is d.balance else f" (balance converted from {d.currency})"
+        apr = rate_of[d.id]
+        applied = min(amount, balance)
         saved = (applied * apr / Decimal("100")).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-        note = f"Guaranteed {apr}% return — avoids ~£{saved}/year in interest"
-        if d.promo_apr is not None and d.promo_ends_on is not None and today <= d.promo_ends_on:
+        if not prepayable(d):
+            note = "Flat-rate loan — interest is fixed on the original principal, so prepaying saves no interest"
+        elif d.repayment_type == "statement_only":
+            note = (
+                f"Estimated {apr}% return (rate inferred from installment and term) — avoids ~£{saved}/year in interest"
+            )
+        elif d.promo_apr is not None and d.promo_ends_on is not None and today <= d.promo_ends_on:
             note = (
                 f"0%/promo until {d.promo_ends_on.isoformat()} — clearing before the cliff "
                 f"avoids reverting to {d.apr or 0}%"
             )
+        else:
+            note = f"Guaranteed {apr}% return — avoids ~£{saved}/year in interest"
         options.append(
             AllocationOption(
                 kind="debt",
@@ -121,9 +152,10 @@ def rank_allocations(
                 yearly_interest_saved=saved,
                 months_earlier=None,
                 runway_months_gained=None,
-                note=note,
+                note=note + converted_suffix,
             )
         )
+    options.extend(unconverted)  # flagged, after the ranked debts
 
     for goal_id, name, target, current, target_date in goals:
         remaining = target - current

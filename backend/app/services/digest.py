@@ -27,9 +27,10 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.debt import Debt
 from app.models.user import User
-from app.services.account_loader import load_forecast_scope, load_txn_lites
+from app.services.account_loader import load_forecast_scope, load_fx_rates, load_txn_lites
 from app.services.analytics.debt_plan import DebtInput
 from app.services.analytics.forecast import project
+from app.services.analytics.fx import convert_optional
 from app.services.analytics.net_worth import current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
 from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
@@ -60,8 +61,11 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     # One data load feeds freshness, the accounts list, and the forecast start.
     # The projection shares the forecast endpoint's single-currency scope so
     # the emailed warning can never disagree with the in-app forecast.
-    account_data, _display, in_display, _excluded = load_forecast_scope(db, user)
+    account_data, display, in_display, _excluded = load_forecast_scope(db, user)
     included_ids = {a.id for a in in_display}
+    # Foreign-currency debt amounts convert at the user's saved rates before
+    # they enter display-currency text (exclude-and-flag when no rate exists).
+    fx_rates = load_fx_rates(db, user.id)
 
     # --- Data freshness -------------------------------------------------------
     # Fresh = a recent transaction OR a recent balance snapshot: valuation-only
@@ -87,7 +91,7 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     ]
     if cliffs:
         lines = [
-            f"  - {d.name}: promo rate ends {d.promo_ends_on} with {_fmt(d.current_balance)} owed"
+            f"  - {d.name}: promo rate ends {d.promo_ends_on} {_owed_text(d, display, fx_rates)}"
             + (f", reverting to {d.interest_rate_apr}%" if d.interest_rate_apr else "")
             for d in cliffs
         ]
@@ -170,10 +174,12 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
                 # (including goals and runway) lives on the Dashboard.
                 options = rank_allocations(
                     summary.surplus,
-                    [_debt_input(d) for d in debts if d.current_balance > 0],
+                    [DebtInput.from_model(d) for d in debts if d.current_balance > 0],
                     [],
                     None,
                     today=today,
+                    display_currency=display,
+                    rates=fx_rates,
                 )
                 if options:
                     o = options[0]
@@ -202,16 +208,16 @@ def compose_digest(db: Session, user: User, today: date | None = None) -> Digest
     return Digest(subject=subject, body=body, item_count=count)
 
 
-def _debt_input(d: Debt) -> DebtInput:
-    return DebtInput(
-        id=d.id,
-        name=d.name,
-        balance=d.current_balance,
-        apr=d.interest_rate_apr,
-        promo_apr=d.promo_apr,
-        promo_ends_on=d.promo_ends_on,
-        minimum_payment=d.minimum_payment,
-    )
+def _owed_text(d: Debt, display: str | None, rates: dict[str, Decimal]) -> str:
+    """The 'X owed' fragment for a debt line, converting foreign-currency
+    balances to the display currency — a missing rate excludes the figure and
+    flags why, never mixing a native magnitude into display-currency text."""
+    converted = convert_optional(d.current_balance, d.currency, display, rates)
+    if converted is None:
+        return f"— balance held in {d.currency} (no FX rate saved)"
+    if converted is d.current_balance:  # passthrough — already display-denominated
+        return f"with {_fmt(converted)} owed"
+    return f"with {_fmt(converted)} owed (converted from {d.currency})"
 
 
 def send_email(to: str, subject: str, body: str) -> None:

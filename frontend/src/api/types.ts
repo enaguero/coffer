@@ -14,12 +14,27 @@ export interface User {
   email: string;
   full_name: string | null;
   display_currency: string | null;
+  fx_auto_refresh: boolean;
 }
 
 export interface FxRate {
   currency: string;
   rate: string;
   as_of: string | null;
+  // "auto" rows come from the opt-in feed; a manual PUT flips them to "manual"
+  // and the feed never overwrites them again.
+  source: "manual" | "auto";
+}
+
+export interface FxRefreshOut {
+  // Rows actually written by this refresh; 0 with rates present means the
+  // feed skipped (failure cooldown) or failed — last-known rates still serve.
+  refreshed_count: number;
+  // Why nothing was written when the feed itself was the reason: a recent
+  // failure's cooldown suppressed the fetch, or the fetch ran and failed.
+  // null on success — including a benign 0 with nothing to refresh.
+  skipped_reason: "cooldown" | "provider_error" | null;
+  rates: FxRate[];
 }
 
 export type UkWrapper = "isa" | "lisa" | "pension";
@@ -104,6 +119,8 @@ export interface Transaction {
   external_id: string | null;
 }
 
+export type DebtRepaymentType = "revolving" | "amortized" | "flat" | "statement_only";
+
 export interface Debt {
   id: number;
   name: string;
@@ -114,6 +131,9 @@ export interface Debt {
   promo_apr: string | null;
   promo_ends_on: string | null;
   minimum_payment: string | null;
+  repayment_type: DebtRepaymentType;
+  currency: string | null; // null = the user's display currency
+  installment_amount: string | null;
   due_day_of_month: number | null;
   starts_on: string | null;
   ends_on: string | null;
@@ -125,6 +145,9 @@ export interface DebtPlanDebt {
   name: string;
   payoff_date: string | null;
   interest_paid: string;
+  // The debt's own currency (null = display currency). Simulation figures are
+  // display-denominated — converted once at plan start.
+  currency: string | null;
 }
 
 export interface PromoCliff {
@@ -134,6 +157,18 @@ export interface PromoCliff {
   balance_at_expiry: string;
   reverting_apr: string;
   extra_yearly_interest: string;
+}
+
+export interface SchedulePayment {
+  debt_id: number;
+  amount: string;
+}
+
+export interface ScheduleMonth {
+  month: string;
+  payments: SchedulePayment[];
+  // Budget the month couldn't place: only flat loans still open, or all cleared.
+  uncommitted: string;
 }
 
 export interface DebtPlan {
@@ -150,12 +185,17 @@ export interface DebtPlan {
   promo_cliffs: PromoCliff[];
   assumptions: string[];
   unpayable: boolean;
+  // Per-debt monthly payments — populated only for the optimal plan.
+  schedule: ScheduleMonth[];
 }
 
 export interface DebtPlanCompare {
   minimum: DebtPlan;
   snowball: DebtPlan;
   avalanche: DebtPlan;
+  optimal: DebtPlan;
+  // Debt currencies with no saved FX rate — those debts sit outside every plan.
+  excluded_currencies: string[];
 }
 
 export interface RecurringItem {
@@ -215,7 +255,14 @@ export interface NetWorth {
   display_currency: string | null;
   excluded_currencies: string[];
   accounts: AccountBalanceInfo[];
-  register_debts: Array<{ id: number; name: string; balance: string }>;
+  register_debts: Array<{
+    id: number;
+    name: string;
+    balance: string; // in the debt's own currency
+    currency: string | null; // null = display currency by convention
+    converted: boolean; // false = no FX rate saved, excluded from totals
+    payoff_date: string | null; // at contractual minimums; null = never clears or unconvertible
+  }>;
   assets: string;
   liabilities: string;
   net: string;
@@ -266,9 +313,17 @@ export interface AccountCoverage {
   last_snapshot_on: string | null;
 }
 
+export interface DebtSummaryItem extends Debt {
+  // False = foreign-currency balance with no saved FX rate — listed raw but
+  // excluded from total_owed.
+  converted: boolean;
+}
+
 export interface DebtSummary {
+  // Display-currency total over convertible debts only.
   total_owed: string;
-  by_debt: Debt[];
+  by_debt: DebtSummaryItem[];
+  excluded_currencies: string[];
 }
 
 export interface BudgetMonthCell {

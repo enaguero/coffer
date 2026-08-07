@@ -42,6 +42,16 @@ from app.core.config import settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
+from app.services.fx_feed import reset_failure_cooldowns  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_fx_cooldowns() -> Generator[None, None, None]:
+    """The FX feed's failure cooldown is module-level in-process state — never
+    let one test's outage leak into the next."""
+    reset_failure_cooldowns()
+    yield
+    reset_failure_cooldowns()
 
 
 @pytest.fixture(autouse=True)
@@ -94,8 +104,16 @@ def db_connection(engine: Engine) -> Generator[Connection, None, None]:
 
 @pytest.fixture()
 def db_session(db_connection: Connection) -> Generator[Session, None, None]:
-    """A session bound to the rollback-on-teardown connection."""
-    Maker = sessionmaker(bind=db_connection, autoflush=False, autocommit=False, future=True)
+    """A session bound to the rollback-on-teardown connection.
+
+    join_transaction_mode="create_savepoint" makes route-level commit() and
+    rollback() operate on a SAVEPOINT nested inside the outer transaction, so
+    a service-layer rollback (e.g. the FX feed's failure path) discards only
+    uncommitted work — with the default mode it would roll back the entire
+    test's state, users and all."""
+    Maker = sessionmaker(
+        bind=db_connection, autoflush=False, autocommit=False, future=True, join_transaction_mode="create_savepoint"
+    )
     session = Maker()
     try:
         yield session

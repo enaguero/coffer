@@ -44,6 +44,7 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      FX_FEED_URL: ${FX_FEED_URL:-https://open.er-api.com/v6/latest}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

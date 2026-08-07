@@ -15,7 +15,6 @@ from app.core.deps import CurrentUser, DbSession
 from app.core.rate_limit import limiter
 from app.models.account import Account, UkWrapper
 from app.models.debt import Debt
-from app.models.fx_rate import FxRate
 from app.models.goal import Goal
 from app.models.transaction import Transaction
 from app.schemas.insights import (
@@ -32,25 +31,26 @@ from app.schemas.insights import (
 from app.services.account_loader import (
     load_account_data,
     load_forecast_scope,
+    load_fx_rates,
     load_txn_lites,
     resolve_display_currency,
     sum_positive_inflows,
 )
 from app.services.analytics.allowances import compute_allowances, tax_year_bounds
-from app.services.analytics.debt_plan import DebtInput
+from app.services.analytics.debt_plan import (
+    FIXED_INSTALLMENT_TYPES,
+    DebtInput,
+    convert_debt_inputs,
+    minimums_payoff_dates,
+)
 from app.services.analytics.forecast import project
 from app.services.analytics.net_worth import compute_net_worth, current_balance
 from app.services.analytics.recurring import detect_raises, detect_recurring
 from app.services.analytics.surplus import latest_complete_month, rank_allocations, summarize_month
 from app.services.digest import compose_digest, send_email
+from app.services.fx_feed import refresh_user_rates
 
 router = APIRouter(prefix="/insights", tags=["insights"])
-
-
-def _fx_rates(db, user_id: int) -> dict:
-    return {
-        r.currency: r.rate for r in db.scalars(select(FxRate).where(FxRate.user_id == user_id))
-    }
 
 
 def _debt_inputs(db, user_id: int) -> list[DebtInput]:
@@ -84,13 +84,24 @@ def forecast(
     items = detect_recurring(load_txn_lites(db, current.id, account_ids=included_ids))
     start = sum((current_balance(a).balance for a in in_display), Decimal("0"))
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
+
+    # A marker's amount is the debt's contractual payment: the installment for
+    # the fixed-installment types (whose minimum_payment is typically NULL),
+    # the minimum for revolving.
+    def _due_amount(d: Debt) -> Decimal | None:
+        if str(d.repayment_type) in FIXED_INSTALLMENT_TYPES and d.installment_amount is not None:
+            return d.installment_amount
+        return d.minimum_payment
+
     # Due markers share the calendar with display-currency amounts; debts tied
-    # to a foreign-currency account would render their minimums mislabeled.
+    # to a foreign-currency account — or carrying a foreign currency of their
+    # own — would render their payments mislabeled.
     currency_of = {a.id: a.currency for a in account_data}
     due_days = [
-        (d.name, d.due_day_of_month, d.minimum_payment)
+        (d.name, d.due_day_of_month, _due_amount(d))
         for d in debts
         if d.due_day_of_month is not None
+        and (display is None or d.currency is None or d.currency == display)
         and (display is None or d.account_id is None or currency_of.get(d.account_id, display) == display)
     ]
     result = project(start, items, days=days, reserve=reserve, debt_due_days=due_days)
@@ -119,16 +130,29 @@ def networth(
 ) -> NetWorthOut:
     account_data = load_account_data(db, current.id)
     debts = db.scalars(select(Debt).where(Debt.user_id == current.id)).all()
+    display = resolve_display_currency(current, account_data)
+    # Opportunistic FX refresh, mirroring GET /fx: a no-op unless the user
+    # opted in, and refresh_user_rates never raises — any failure serves
+    # last-known rates instead of a 500.
+    in_use = {a.currency for a in account_data} | {d.currency for d in debts if d.currency is not None}
+    refresh_user_rates(db, current, in_use, display)
+    rates = load_fx_rates(db, current.id)
+    # Per-debt at-minimums payoff dates over the convertible debts (under
+    # minimums each debt pays only its own contractual amount, so excluding
+    # the unconvertible ones can't shift anyone else's date). A debt that
+    # never clears — or can't be converted — reports no date.
+    pool, _excluded, _notes = convert_debt_inputs([DebtInput.from_model(d) for d in debts], display, rates)
+    payoff_by_id = minimums_payoff_dates(pool)
     report = compute_net_worth(
         account_data,
-        [(d.id, d.name, d.current_balance, d.account_id) for d in debts],
+        [(d.id, d.name, d.current_balance, d.account_id, d.currency, payoff_by_id.get(d.id)) for d in debts],
         months=months,
-        display_currency=resolve_display_currency(current, account_data),
-        rates=_fx_rates(db, current.id),
+        display_currency=display,
+        rates=rates,
     )
     return NetWorthOut(
         accounts=[asdict(b) for b in report.accounts],
-        register_debts=[{"id": d_id, "name": name, "balance": bal} for d_id, name, bal in report.register_debts],
+        register_debts=[asdict(d) for d in report.register_debts],
         assets=report.assets,
         liabilities=report.liabilities,
         net=report.net,
@@ -277,7 +301,18 @@ def surplus(
         if g.account_id is None or display is None or currency_of.get(g.account_id, display) == display
     ]
 
-    options = rank_allocations(considered, _debt_inputs(db, current.id), goal_tuples, floor) if considered > 0 else []
+    options = (
+        rank_allocations(
+            considered,
+            _debt_inputs(db, current.id),
+            goal_tuples,
+            floor,
+            display_currency=display,
+            rates=load_fx_rates(db, current.id),
+        )
+        if considered > 0
+        else []
+    )
 
     items = detect_recurring(load_txn_lites(db, current.id, account_ids=display_ids if display else None))
     raises = detect_raises(items)

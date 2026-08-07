@@ -74,7 +74,12 @@ class AccountBalanceOut(BaseModel):
 class RegisterDebtOut(BaseModel):
     id: int
     name: str
-    balance: Decimal
+    balance: Decimal  # in the debt's own currency
+    currency: str | None = None  # None = display currency by convention
+    # Included in liability totals? False when no FX rate is saved.
+    converted: bool = True
+    # Payoff at contractual minimums; None = never clears or unconvertible.
+    payoff_date: date | None = None
 
 
 class NetWorthPointOut(BaseModel):

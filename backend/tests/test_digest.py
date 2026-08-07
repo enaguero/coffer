@@ -131,3 +131,17 @@ def client_get_preview(auth_client):
     r = client.get("/api/v1/insights/digest/preview", headers=headers)
     assert r.status_code == 200
     return r.json()
+
+
+def test_owed_text_converts_foreign_balance_or_flags_missing_rate() -> None:
+    """A foreign-currency balance converts at the saved rate before entering
+    display-currency text; with no rate it is excluded and flagged — the
+    native magnitude never leaks into a display-denominated sentence."""
+    from decimal import Decimal
+
+    from app.models.debt import Debt
+    from app.services.digest import _owed_text
+
+    d = Debt(name="Chile loan", current_balance=Decimal("1000000.00"), currency="CLP")
+    assert _owed_text(d, "GBP", {"CLP": Decimal("0.00082")}) == "with 820.00 owed (converted from CLP)"
+    assert _owed_text(d, "GBP", {}) == "— balance held in CLP (no FX rate saved)"

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Landmark, PiggyBank, Scale } from "lucide-react";
+import { AlertTriangle, Landmark, PiggyBank, RefreshCw, Scale } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import {
   Area,
@@ -12,7 +12,7 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { Account, Allowances, FxRate, NetWorth as NetWorthData } from "../api/types";
+import type { Account, Allowances, FxRate, FxRefreshOut, NetWorth as NetWorthData } from "../api/types";
 import {
   Badge,
   Button,
@@ -26,7 +26,7 @@ import {
   WarningBanner,
 } from "../components/ui";
 import { useAuth } from "../contexts/useAuth";
-import { fmtMoney, toNum } from "../lib/format";
+import { fmtMoney, fmtMonthYear, toNum } from "../lib/format";
 import { useUserCurrency } from "../lib/useCurrency";
 
 const WRAPPER_LABEL: Record<string, string> = {
@@ -42,6 +42,10 @@ const SOURCE_TONE: Record<string, "emerald" | "sky" | "slate"> = {
   opening: "slate",
 };
 
+// Rates travel as strings so high-precision values survive; parseFloat
+// would silently truncate inputs like "1,000" to 1.
+const RATE_RE = /^(\d+\.?\d*|\.\d+)$/;
+
 export default function NetWorth() {
   const qc = useQueryClient();
   const currency = useUserCurrency();
@@ -52,24 +56,40 @@ export default function NetWorth() {
   });
   const [newFxCurrency, setNewFxCurrency] = useState("");
   const [newFxRate, setNewFxRate] = useState("");
-  // Rates travel as strings so high-precision values survive; parseFloat
-  // would silently truncate inputs like "1,000" to 1.
-  const rateValid = /^(\d+\.?\d*|\.\d+)$/.test(newFxRate) && Number(newFxRate) > 0;
+  // Per-row draft edits, keyed by currency — committed on blur, reverted when
+  // invalid. Auto rows stay editable: a manual PUT flips them to "manual".
+  const [rateEdits, setRateEdits] = useState<Record<string, string>>({});
+  const rateValid = RATE_RE.test(newFxRate) && Number(newFxRate) > 0;
   const invalidateFx = (keys: string[]) => {
     for (const key of keys) qc.invalidateQueries({ queryKey: [key] });
   };
-  const saveRate = useMutation({
+  // One PUT for both the add-rate form and per-row edits; the form clears its
+  // own fields via a per-call onSuccess so a row commit can't wipe a
+  // half-typed new rate.
+  const putRate = useMutation({
     mutationFn: async (vars: { currency: string; rate: string }) =>
       api.put("/api/v1/fx", [{ currency: vars.currency, rate: vars.rate }]),
-    onSuccess: () => {
-      setNewFxCurrency("");
-      setNewFxRate("");
-      invalidateFx(["fx", "networth"]);
-    },
+    onSuccess: () => invalidateFx(["fx", "networth"]),
   });
   const deleteRate = useMutation({
     mutationFn: async (currency: string) => api.delete(`/api/v1/fx/${currency}`),
     onSuccess: () => invalidateFx(["fx", "networth"]),
+  });
+  const setFxAutoRefresh = useMutation({
+    mutationFn: async (fx_auto_refresh: boolean) => api.patch("/api/v1/auth/me", { fx_auto_refresh }),
+    onSuccess: () => {
+      // Enabling lets the next /fx read pull fresh auto rates — refetch them
+      // AND the converted totals that depend on them, or the page keeps
+      // showing pre-toggle numbers. Invalidate before refresh() so a failed
+      // user refetch can't strand stale rates (mirrors setDisplayCurrency's
+      // ordering).
+      invalidateFx(["fx", "networth", "forecast"]);
+      void refresh().catch(() => {});
+    },
+  });
+  const refreshRates = useMutation({
+    mutationFn: async () => (await api.post<FxRefreshOut>("/api/v1/fx/refresh")).data,
+    onSuccess: () => invalidateFx(["fx", "networth", "forecast"]),
   });
   const setDisplayCurrency = useMutation({
     // null clears the setting back to automatic (most-common currency).
@@ -117,6 +137,25 @@ export default function NetWorth() {
     if (!valAccount || !valAmount) return;
     addValuation.mutate();
   }
+
+  function commitRateEdit(r: FxRate) {
+    const draft = rateEdits[r.currency];
+    if (draft === undefined) return;
+    setRateEdits((prev) => {
+      const next = { ...prev };
+      delete next[r.currency];
+      return next;
+    });
+    if (draft === r.rate || !RATE_RE.test(draft) || !(Number(draft) > 0)) return;
+    putRate.mutate({ currency: r.currency, rate: draft });
+  }
+
+  // Staleness anchor for the refresh-failure message: the newest saved as_of.
+  const newestAsOf =
+    fxRates.data?.reduce<string | null>(
+      (acc, r) => (r.as_of && (acc === null || r.as_of > acc) ? r.as_of : acc),
+      null,
+    ) ?? null;
 
   const nw = networth.data;
   // The response says which currency the totals were converted into — trust
@@ -269,6 +308,7 @@ export default function NetWorth() {
                 <tr>
                   <th className="py-2 text-left font-medium">Account</th>
                   <th className="py-2 text-left font-medium">As of</th>
+                  <th className="py-2 text-left font-medium">Paid off</th>
                   <th className="py-2 text-right font-medium">Balance</th>
                 </tr>
               </thead>
@@ -280,6 +320,7 @@ export default function NetWorth() {
                       {!a.converted && <Badge tone="amber">no rate — excluded</Badge>}
                     </td>
                     <td className="py-2 text-xs text-slate-500 nums">{a.as_of ?? "—"}</td>
+                    <td className="py-2" />
                     <td
                       className={`py-2 text-right nums font-medium ${
                         toNum(a.balance) < 0 ? "text-rose-600" : ""
@@ -293,10 +334,20 @@ export default function NetWorth() {
                   <tr key={`debt-${d.id}`} className="border-t border-slate-100">
                     <td className="py-2">
                       {d.name} <Badge tone="rose">debt</Badge>
+                      {!d.converted && <Badge tone="amber">no rate — excluded</Badge>}
                     </td>
                     <td className="py-2 text-xs text-slate-500">register</td>
+                    <td className="py-2 text-xs text-slate-500 nums">
+                      {/* Null even for a payable debt when the portfolio is
+                          unpayable at minimums — hence the plain em-dash. */}
+                      {d.payoff_date ? (
+                        <span title="At contractual minimums">~ {fmtMonthYear(d.payoff_date)}</span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="py-2 text-right nums font-medium text-rose-600">
-                      −{fmtMoney(d.balance, displayCcy)}
+                      −{fmtMoney(d.balance, d.currency ?? displayCcy)}
                     </td>
                   </tr>
                 ))}
@@ -367,7 +418,19 @@ export default function NetWorth() {
                 {fxRates.data?.map((r) => (
                   <li key={r.currency} className="flex items-center gap-2 text-sm">
                     <span className="w-10 font-mono">{r.currency}</span>
-                    <span className="nums flex-1">{r.rate}</span>
+                    <Input
+                      value={rateEdits[r.currency] ?? r.rate}
+                      onChange={(e) =>
+                        setRateEdits((prev) => ({ ...prev, [r.currency]: e.target.value }))
+                      }
+                      onBlur={() => commitRateEdit(r)}
+                      className="!w-28 !py-1 nums"
+                      aria-label={`Rate for ${r.currency}`}
+                    />
+                    <Badge tone={r.source === "auto" ? "sky" : "slate"}>{r.source}</Badge>
+                    <span className="flex-1 text-right text-xs text-slate-400 nums">
+                      {r.as_of ?? "—"}
+                    </span>
                     <button
                       onClick={() => deleteRate.mutate(r.currency)}
                       className="text-xs text-slate-400 hover:text-rose-600"
@@ -393,8 +456,18 @@ export default function NetWorth() {
                 />
                 <Button
                   className="!py-1.5"
-                  disabled={!/^[A-Z]{3}$/.test(newFxCurrency) || !rateValid || saveRate.isPending}
-                  onClick={() => saveRate.mutate({ currency: newFxCurrency, rate: newFxRate })}
+                  disabled={!/^[A-Z]{3}$/.test(newFxCurrency) || !rateValid || putRate.isPending}
+                  onClick={() =>
+                    putRate.mutate(
+                      { currency: newFxCurrency, rate: newFxRate },
+                      {
+                        onSuccess: () => {
+                          setNewFxCurrency("");
+                          setNewFxRate("");
+                        },
+                      },
+                    )
+                  }
                 >
                   Save rate
                 </Button>
@@ -404,9 +477,69 @@ export default function NetWorth() {
                   Enter a positive number with a dot decimal, e.g. 0.00082 — no commas.
                 </p>
               )}
+              <div className="mt-3 border-t border-slate-100 pt-3">
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={user?.fx_auto_refresh ?? false}
+                    onChange={(e) => setFxAutoRefresh.mutate(e.target.checked)}
+                    disabled={setFxAutoRefresh.isPending}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Fetch rates automatically (daily)
+                    <span className="block text-xs text-slate-400">
+                      Calls an external exchange-rate service; manual rates always win.
+                    </span>
+                  </span>
+                </label>
+                {user?.fx_auto_refresh && (
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      className="!py-1.5"
+                      disabled={refreshRates.isPending}
+                      onClick={() => refreshRates.mutate()}
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${refreshRates.isPending ? "animate-spin" : ""}`}
+                      />
+                      Refresh now
+                    </Button>
+                    {refreshRates.isError && (
+                      <p className="mt-1 text-xs text-amber-600">
+                        Refresh failed — showing last-known rates
+                        {newestAsOf ? ` from ${newestAsOf}` : ""}.
+                      </p>
+                    )}
+                    {/* A 200 with zero rows written carries skipped_reason
+                        saying why — don't let the click look like it worked. */}
+                    {refreshRates.isSuccess && refreshRates.data.skipped_reason === "provider_error" && (
+                      <p className="mt-1 text-xs text-amber-600">
+                        Provider unreachable — showing last-known rates
+                        {newestAsOf ? ` from ${newestAsOf}` : ""}.
+                      </p>
+                    )}
+                    {refreshRates.isSuccess && refreshRates.data.skipped_reason === "cooldown" && (
+                      <p className="mt-1 text-xs text-amber-600">
+                        Recently failed — retry in a few minutes.
+                      </p>
+                    )}
+                    {refreshRates.isSuccess &&
+                      refreshRates.data.refreshed_count === 0 &&
+                      !refreshRates.data.skipped_reason && (
+                        <p className="mt-1 text-xs text-amber-600">
+                          Nothing refreshed — showing last-known rates
+                          {newestAsOf ? ` from ${newestAsOf}` : ""}.
+                        </p>
+                      )}
+                  </div>
+                )}
+              </div>
               <p className="mt-2 text-xs text-slate-400">
-                Rates are manual — no external API. Changing the display currency clears saved rates
-                (they were defined against the old currency).
+                Enter rates by hand, or opt in above to fetch them daily — hand-entered rates are
+                never overwritten. Changing the display currency clears saved rates (they were
+                defined against the old currency).
               </p>
             </div>
           </div>

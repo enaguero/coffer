@@ -137,6 +137,97 @@ def test_debt_plan_avalanche_saves_interest(auth_client) -> None:
     assert any(c["name"] == "0% transfer card" for c in cliffs)
 
 
+def test_networth_register_debts_carry_minimums_payoff_dates(auth_client) -> None:
+    """Register debts report an at-minimums payoff date from an INDEPENDENT
+    minimums-only run per debt; a debt whose interest outruns its minimum
+    reports None. The payable debt takes 36 months on purpose — far past where
+    a joint simulator run, truncated by the runaway debt's divergence
+    bail-out, used to stop (which wrongly nulled payable debts' dates)."""
+    client, headers, _ = auth_client
+    _account(client, headers)
+    r = client.post(
+        "/api/v1/debts",
+        headers=headers,
+        json={"name": "Payable", "current_balance": "3600", "interest_rate_apr": "0", "minimum_payment": "100"},
+    )
+    assert r.status_code == 201, r.text
+    # ~£83/month of interest at 99.9% APR outruns a £5 minimum — never clears.
+    r = client.post(
+        "/api/v1/debts",
+        headers=headers,
+        json={"name": "Unpayable", "current_balance": "1000", "interest_rate_apr": "99.9", "minimum_payment": "5"},
+    )
+    assert r.status_code == 201, r.text
+
+    nw = client.get("/api/v1/insights/networth", headers=headers).json()
+    by_name = {d["name"]: d for d in nw["register_debts"]}
+    assert by_name["Payable"]["payoff_date"] is not None
+    assert by_name["Unpayable"]["payoff_date"] is None
+
+
+def test_forecast_due_marker_uses_installment_for_amortized_debt(auth_client) -> None:
+    """Fixed-installment debts have no minimum_payment — their due-day marker
+    must carry the installment, not an amount-less annotation."""
+    client, headers, _ = auth_client
+    _account(client, headers)  # GBP → resolves the display currency
+    r = client.post(
+        "/api/v1/debts",
+        headers=headers,
+        json={
+            "name": "Car loan",
+            "repayment_type": "amortized",
+            "current_balance": "8000",
+            "installment_amount": "250.00",
+            "ends_on": "2029-06-01",
+            "interest_rate_apr": "7.5",
+            "due_day_of_month": 12,
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    f = client.get("/api/v1/insights/forecast", headers=headers).json()
+    marker = next(m for m in f["due_markers"] if m["name"] == "Car loan")
+    assert marker["minimum_payment"] is not None
+    assert float(marker["minimum_payment"]) == 250.0
+
+
+def test_networth_survives_fx_feed_failure(auth_client, monkeypatch) -> None:
+    """The opportunistic FX refresh on the net-worth load must never fail the
+    endpoint — neither a provider error nor an unexpected exception. "Reads
+    never raise" is refresh_user_rates' own contract, so the endpoint calls
+    it bare."""
+    from app.services import fx_feed
+
+    client, headers, _ = auth_client
+    _account(client, headers)  # GBP → resolves the display currency
+    r = client.post(
+        "/api/v1/debts",
+        headers=headers,
+        json={"name": "Chile loan", "current_balance": "1000000", "currency": "CLP"},
+    )
+    assert r.status_code == 201, r.text
+    r = client.patch("/api/v1/auth/me", headers=headers, json={"fx_auto_refresh": True})
+    assert r.status_code == 200, r.text
+
+    # Provider blows up mid-fetch: the feed degrades to last-known rates.
+    def _network_boom(url):
+        raise OSError("provider down")
+
+    monkeypatch.setattr(fx_feed, "_http_get", _network_boom)
+    r = client.get("/api/v1/insights/networth", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["excluded_currencies"] == ["CLP"]  # no rate landed — honest exclusion
+
+    # Even an unexpected exception inside the refresh can't 500 the load.
+    fx_feed.reset_failure_cooldowns()  # the failed fetch above started one
+
+    def _refresh_boom(*args, **kwargs):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(fx_feed, "fetch_rates", _refresh_boom)
+    assert client.get("/api/v1/insights/networth", headers=headers).status_code == 200
+
+
 def test_recurring_forecast_and_surplus_flow(auth_client) -> None:
     client, headers, _ = auth_client
     account_id = _account(client, headers, bank_id="lloyds")
