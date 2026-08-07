@@ -1,7 +1,41 @@
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.models.debt import DebtRepaymentType
+
+
+def _upper_currency(value: str | None) -> str | None:
+    # Uppercased at the edge so FX conversion and display-currency filters
+    # (exact-string comparisons) can't be defeated by a lowercase code.
+    return value.upper() if value is not None else None
+
+
+def repayment_type_violation(
+    repayment_type: DebtRepaymentType,
+    *,
+    installment_amount: Decimal | None,
+    ends_on: date | None,
+    original_principal: Decimal | None,
+    current_balance: Decimal | None,
+) -> str | None:
+    """The cross-field rules per repayment type; None when the shape is valid.
+
+    Shared by DebtCreate's validator and the PATCH handler (which must check
+    the *merged* debt — a partial update can't see the missing half)."""
+    repayment_type = DebtRepaymentType(repayment_type)
+    if repayment_type == DebtRepaymentType.REVOLVING:
+        return None
+    if installment_amount is None:
+        return f"{repayment_type.value} debts require installment_amount"
+    if ends_on is None:
+        return f"{repayment_type.value} debts require ends_on"
+    if repayment_type == DebtRepaymentType.FLAT and (original_principal is None or original_principal <= 0):
+        return "flat debts require original_principal > 0 (interest is computed on it)"
+    if repayment_type == DebtRepaymentType.STATEMENT_ONLY and (current_balance is None or current_balance <= 0):
+        return "statement_only debts require current_balance > 0"
+    return None
 
 
 class DebtBase(BaseModel):
@@ -13,14 +47,31 @@ class DebtBase(BaseModel):
     promo_apr: Decimal | None = None
     promo_ends_on: date | None = None
     minimum_payment: Decimal | None = None
+    repayment_type: DebtRepaymentType = DebtRepaymentType.REVOLVING
+    # NULL means the user's display currency.
+    currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
+    installment_amount: Decimal | None = Field(default=None, gt=0)
     due_day_of_month: int | None = Field(default=None, ge=1, le=31)
     starts_on: date | None = None
     ends_on: date | None = None
     notes: str | None = None
 
+    _upper_currency = field_validator("currency")(_upper_currency)
+
 
 class DebtCreate(DebtBase):
-    pass
+    @model_validator(mode="after")
+    def _check_repayment_type_shape(self) -> "DebtCreate":
+        violation = repayment_type_violation(
+            self.repayment_type,
+            installment_amount=self.installment_amount,
+            ends_on=self.ends_on,
+            original_principal=self.original_principal,
+            current_balance=self.current_balance,
+        )
+        if violation:
+            raise ValueError(violation)
+        return self
 
 
 class DebtUpdate(BaseModel):
@@ -32,10 +83,15 @@ class DebtUpdate(BaseModel):
     promo_apr: Decimal | None = None
     promo_ends_on: date | None = None
     minimum_payment: Decimal | None = None
+    repayment_type: DebtRepaymentType | None = None
+    currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
+    installment_amount: Decimal | None = Field(default=None, gt=0)
     due_day_of_month: int | None = Field(default=None, ge=1, le=31)
     starts_on: date | None = None
     ends_on: date | None = None
     notes: str | None = None
+
+    _upper_currency = field_validator("currency")(_upper_currency)
 
 
 class DebtOut(DebtBase):

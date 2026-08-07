@@ -14,6 +14,7 @@ from app.schemas.debt import (
     PlanCompareOut,
     PlanOut,
     PlanRequest,
+    repayment_type_violation,
 )
 from app.services.analytics.debt_plan import DebtInput, PlanResult, compare_strategies
 
@@ -98,7 +99,25 @@ def _get_owned(db, current, debt_id: int) -> Debt:
 @router.patch("/{debt_id}", response_model=DebtOut)
 def update_debt(debt_id: int, payload: DebtUpdate, current: CurrentUser, db: DbSession) -> Debt:
     debt = _get_owned(db, current, debt_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Cross-field type rules must hold on the *merged* debt — a partial PATCH
+    # (e.g. revolving → amortized without an installment) can't be validated
+    # from the payload alone. Checked before mutating so a violation leaves
+    # the debt untouched.
+    def _merged(field: str):
+        return updates[field] if field in updates else getattr(debt, field)
+
+    violation = repayment_type_violation(
+        _merged("repayment_type"),
+        installment_amount=_merged("installment_amount"),
+        ends_on=_merged("ends_on"),
+        original_principal=_merged("original_principal"),
+        current_balance=_merged("current_balance"),
+    )
+    if violation:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=violation)
+    for key, value in updates.items():
         setattr(debt, key, value)
     db.commit()
     db.refresh(debt)

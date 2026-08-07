@@ -1,10 +1,21 @@
 from datetime import date
 from decimal import Decimal
+from enum import StrEnum
 
-from sqlalchemy import Date, ForeignKey, Numeric, SmallInteger, String
+from sqlalchemy import Date, Enum, ForeignKey, Numeric, SmallInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+
+class DebtRepaymentType(StrEnum):
+    """How interest accrues and payments are expected (see the behavior matrix
+    in docs/plans — revolving is today's balance×APR semantics)."""
+
+    REVOLVING = "revolving"
+    AMORTIZED = "amortized"
+    FLAT = "flat"
+    STATEMENT_ONLY = "statement_only"
 
 
 class Debt(Base, TimestampMixin):
@@ -14,17 +25,11 @@ class Debt(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    account_id: Mapped[int | None] = mapped_column(
-        ForeignKey("accounts.id", ondelete="SET NULL"), unique=True
-    )
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), unique=True)
 
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    original_principal: Mapped[Decimal] = mapped_column(
-        Numeric(14, 2), nullable=False, default=Decimal("0")
-    )
-    current_balance: Mapped[Decimal] = mapped_column(
-        Numeric(14, 2), nullable=False, default=Decimal("0")
-    )
+    original_principal: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal("0"))
+    current_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal("0"))
     interest_rate_apr: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
     # Promotional-rate window (e.g. a 0% balance-transfer offer). While today
     # <= promo_ends_on the promo rate applies; afterwards interest_rate_apr is
@@ -32,6 +37,20 @@ class Debt(Base, TimestampMixin):
     promo_apr: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
     promo_ends_on: Mapped[date | None] = mapped_column(Date)
     minimum_payment: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    repayment_type: Mapped[DebtRepaymentType] = mapped_column(
+        Enum(DebtRepaymentType, name="debt_repayment_type", values_callable=lambda e: [m.value for m in e]),
+        default=DebtRepaymentType.REVOLVING,
+        server_default="revolving",
+        nullable=False,
+    )
+    # NULL means the user's display currency (the register convention debts
+    # kept before they carried a currency).
+    currency: Mapped[str | None] = mapped_column(String(3))
+    # Precedence: for the fixed-installment types (amortized/flat/statement_only)
+    # installment_amount supersedes minimum_payment everywhere downstream —
+    # simulator budget, surplus ranking, digest lines, seed invariant.
+    # minimum_payment remains meaningful only for revolving debts.
+    installment_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     due_day_of_month: Mapped[int | None] = mapped_column(SmallInteger)
     starts_on: Mapped[date | None] = mapped_column(Date)
     ends_on: Mapped[date | None] = mapped_column(Date)
